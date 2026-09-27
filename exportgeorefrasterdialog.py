@@ -15,11 +15,24 @@ from PyQt5.QtWidgets import QDialog, QFileDialog, QMessageBox
 
 from .ui_exportgeorefrasterdialog import Ui_ExportGeorefRasterDialog
 
+# (display text, GDAL COMPRESS value) pairs of the compression combo;
+# filled from code so that the userData is guaranteed
+COMPRESSION_CHOICES = (
+    ("DEFLATE (lossless, default)", "DEFLATE"),
+    ("ZSTD (lossless, fast)", "ZSTD"),
+    ("JPEG (lossy, photos)", "JPEG"),
+    ("WEBP (lossy, smallest)", "WEBP"),
+)
+
 
 class ExportGeorefRasterDialog(QDialog, Ui_ExportGeorefRasterDialog):
     def __init__(self):
         QDialog.__init__(self)
         self.setupUi(self)
+
+        if self.comboBoxCompression.count() == 0:
+            for text, data in COMPRESSION_CHOICES:
+                self.comboBoxCompression.addItem(text, data)
 
         self.pushButtonBrowse.clicked.connect(self.showBrowserDialog)
         self.checkBoxOnlyWorldFile.stateChanged.connect(self.setupOnlyWorldFile)
@@ -32,6 +45,7 @@ class ExportGeorefRasterDialog(QDialog, Ui_ExportGeorefRasterDialog):
         self.checkBoxOnlyWorldFile.setChecked(False)
         self.checkBoxExportCOG.setChecked(False)
         self.comboBoxResampling.setCurrentIndex(0)
+        self.comboBoxCompression.setCurrentIndex(0)
 
         defaultPath, _ = os.path.splitext(layer.filepath)
         self.defaultPath = defaultPath + "_georeferenced.png"
@@ -116,6 +130,13 @@ class ExportGeorefRasterDialog(QDialog, Ui_ExportGeorefRasterDialog):
             # fallback when the combo was built from the .ui file (no data)
             self.resamplingMethod = ("near", "bilinear", "cubic")[
                 max(0, self.comboBoxResampling.currentIndex())
+            ]
+
+        self.compression = self.comboBoxCompression.currentData()
+        if self.compression is None:
+            # fallback when the combo was built from the .ui file (no data)
+            self.compression = ("DEFLATE", "ZSTD", "JPEG", "WEBP")[
+                max(0, self.comboBoxCompression.currentIndex())
             ]
 
         self.imagePath = self.lineEditImagePath.text()

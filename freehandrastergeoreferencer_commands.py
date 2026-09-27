@@ -18,7 +18,7 @@ from PyQt5.QtGui import QColor, QImage, QImageWriter, QPainter
 from qgis.core import Qgis, QgsMessageLog
 from qgis.gui import QgsMessageBar
 
-from . import transform_math, utils
+from . import export_options, transform_math, utils
 
 
 class ExportGeorefRasterCommand(object):
@@ -33,6 +33,7 @@ class ExportGeorefRasterCommand(object):
         isExportOnlyWorldFile,
         isExportCOG=False,
         resamplingMethod="near",
+        compression=export_options.DEFLATE,
     ):
         # polynomial fit model (order 1/2/3): dedicated export path (the
         # classic center / rotation / scale parameters do not describe the
@@ -44,11 +45,15 @@ class ExportGeorefRasterCommand(object):
                 isExportOnlyWorldFile,
                 isExportCOG,
                 resamplingMethod,
+                compression,
             )
             return
 
         if isExportCOG and not isExportOnlyWorldFile:
-            self.exportCOG(layer, rasterPath, isPutRotationInWorldFile, resamplingMethod)
+            self.exportCOG(
+                layer, rasterPath, isPutRotationInWorldFile, resamplingMethod,
+                compression,
+            )
             return
 
         baseRasterFilePath, _ = os.path.splitext(rasterPath)
@@ -198,9 +203,40 @@ class ExportGeorefRasterCommand(object):
 
     # COG driver note: overviews are generated automatically (OVERVIEWS=AUTO
     # is the default and there is no "ALL" value for the COG driver)
-    COG_CREATION_OPTIONS = ["COMPRESS=DEFLATE", "BIGTIFF=IF_SAFER"]
+    BIGTIFF_OPTION = "BIGTIFF=IF_SAFER"
 
-    def exportCOG(self, layer, rasterPath, keepRotation, resamplingMethod):
+    def _outputBandCount(self, vrt, addAlpha):
+        """Band count of the export result: the warp paths add an alpha
+        band (dstAlpha=True) unless the source already has one."""
+        bands = vrt.RasterCount
+        if addAlpha and bands > 0:
+            last = vrt.GetRasterBand(bands)
+            if last.GetColorInterpretation() != gdal.GCI_AlphaBand:
+                bands += 1
+        return bands
+
+    def _creationOptions(self, driverName, vrt, compression, addAlpha=False):
+        """Validated GDAL creation options for the target driver; when the
+        requested compression is incompatible (unsupported by this GDAL
+        build, or lossy codecs with alpha / exotic data types) the user is
+        warned and DEFLATE is used."""
+        dataType = vrt.GetRasterBand(1).DataType
+        options, warning = export_options.rasterCreationOptions(
+            compression,
+            dataType,
+            self._outputBandCount(vrt, addAlpha),
+            driverName,
+        )
+        if warning:
+            QgsMessageLog.logMessage("Raster Geoferencer: " + warning)
+            widget = QgsMessageBar.createMessage("Raster Geoferencer", warning)
+            self.iface.messageBar().pushWidget(widget, Qgis.Warning, 6)
+        return options
+
+    def exportCOG(
+        self, layer, rasterPath, keepRotation, resamplingMethod,
+        compression=export_options.DEFLATE,
+    ):
         """
         keepRotation=True: pixels are untouched, the rotation is stored in
         the geotransform (ModelTransformation). Some software may not
@@ -217,10 +253,13 @@ class ExportGeorefRasterCommand(object):
             crsWkt = crs.toWkt()
 
             if keepRotation:
-                self._exportCogRotated(srcPath, rasterPath, layer, crsWkt, width, height)
+                self._exportCogRotated(
+                    srcPath, rasterPath, layer, crsWkt, width, height, compression
+                )
             else:
                 self._exportCogNorthUp(
-                    srcPath, rasterPath, layer, crsWkt, width, height, resamplingMethod
+                    srcPath, rasterPath, layer, crsWkt, width, height,
+                    resamplingMethod, compression,
                 )
 
             widget = QgsMessageBar.createMessage(
@@ -243,7 +282,10 @@ class ExportGeorefRasterCommand(object):
             raise RuntimeError("Unable to open the source raster with GDAL: " + srcPath)
         return vrtPath, vrt
 
-    def _exportCogRotated(self, srcPath, rasterPath, layer, crsWkt, width, height):
+    def _exportCogRotated(
+        self, srcPath, rasterPath, layer, crsWkt, width, height,
+        compression=export_options.DEFLATE,
+    ):
         vrtPath, vrt = self._sourceVrt(srcPath)
         try:
             gt = transform_math.geotransform_from_params(
@@ -264,7 +306,10 @@ class ExportGeorefRasterCommand(object):
             rotationKept = False
             if driver is not None:
                 out = driver.CreateCopy(
-                    rasterPath, vrt, options=self.COG_CREATION_OPTIONS
+                    rasterPath,
+                    vrt,
+                    options=self._creationOptions("COG", vrt, compression)
+                    + [self.BIGTIFF_OPTION],
                 )
                 if out is not None:
                     backGt = out.GetGeoTransform()
@@ -283,9 +328,9 @@ class ExportGeorefRasterCommand(object):
                         "TILED=YES",
                         "BLOCKXSIZE=512",
                         "BLOCKYSIZE=512",
-                        "COMPRESS=DEFLATE",
-                        "BIGTIFF=IF_SAFER",
-                    ],
+                        self.BIGTIFF_OPTION,
+                    ]
+                    + self._creationOptions("GTiff", vrt, compression),
                 )
                 if driver is not None:
                     widget = QgsMessageBar.createMessage(
@@ -320,7 +365,8 @@ class ExportGeorefRasterCommand(object):
         return (minX, minY, maxX, maxY)
 
     def _exportCogNorthUp(
-        self, srcPath, rasterPath, layer, crsWkt, width, height, resamplingMethod
+        self, srcPath, rasterPath, layer, crsWkt, width, height, resamplingMethod,
+        compression=export_options.DEFLATE,
     ):
         vrtPath, vrt = self._sourceVrt(srcPath)
         try:
@@ -360,7 +406,10 @@ class ExportGeorefRasterCommand(object):
                 outputBounds=self._northUpOutputBounds(layer, width, height),
                 xRes=layer.xScale,
                 yRes=layer.yScale,
-                creationOptions=self.COG_CREATION_OPTIONS,
+                creationOptions=self._creationOptions(
+                    "COG", vrt, compression, addAlpha=True
+                )
+                + [self.BIGTIFF_OPTION],
             )
         finally:
             gdal.Unlink(vrtPath)
@@ -379,6 +428,7 @@ class ExportGeorefRasterCommand(object):
         isExportOnlyWorldFile,
         isExportCOG,
         resamplingMethod,
+        compression=export_options.DEFLATE,
     ):
         try:
             fit = layer.polyFit()
@@ -395,7 +445,8 @@ class ExportGeorefRasterCommand(object):
                     self.iface.messageBar().pushWidget(widget, Qgis.Warning, 6)
                 return
             self._exportPolyWarp(
-                layer, rasterPath, fit, isExportCOG, resamplingMethod
+                layer, rasterPath, fit, isExportCOG, resamplingMethod,
+                compression,
             )
             widget = QgsMessageBar.createMessage(
                 "Raster Geoferencer", "Raster exported successfully."
@@ -451,7 +502,8 @@ class ExportGeorefRasterCommand(object):
         return gcps
 
     def _exportPolyWarp(
-        self, layer, rasterPath, fit, isExportCOG, resamplingMethod
+        self, layer, rasterPath, fit, isExportCOG, resamplingMethod,
+        compression=export_options.DEFLATE,
     ):
         srcPath = layer.getAbsoluteFilepath()
         width = layer.image.width()
@@ -491,15 +543,18 @@ class ExportGeorefRasterCommand(object):
                 transformerOptions=["ORDER=%d" % fit["poly"]],
             )
             if isExportCOG:
-                warpOptions["creationOptions"] = self.COG_CREATION_OPTIONS
+                warpOptions["creationOptions"] = self._creationOptions(
+                    "COG", vrt, compression, addAlpha=True
+                ) + [self.BIGTIFF_OPTION]
             else:
                 warpOptions["creationOptions"] = [
                     "TILED=YES",
                     "BLOCKXSIZE=512",
                     "BLOCKYSIZE=512",
-                    "COMPRESS=DEFLATE",
-                    "BIGTIFF=IF_SAFER",
-                ]
+                    self.BIGTIFF_OPTION,
+                ] + self._creationOptions(
+                    "GTiff", vrt, compression, addAlpha=True
+                )
             gdal.Warp(rasterPath, vrt, **warpOptions)
         finally:
             gdal.Unlink(vrtPath)

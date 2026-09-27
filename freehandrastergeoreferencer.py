@@ -631,6 +631,7 @@ class FreehandRasterGeoreferencer(object):
                 self.dialogExportGeorefRaster.isExportOnlyWorldFile,
                 isExportCOG=self.dialogExportGeorefRaster.isExportCOG,
                 resamplingMethod=self.dialogExportGeorefRaster.resamplingMethod,
+                compression=self.dialogExportGeorefRaster.compression,
             )
 
     # ------------------------------------------------------------------

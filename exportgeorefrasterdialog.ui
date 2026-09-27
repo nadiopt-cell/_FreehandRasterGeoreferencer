@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>470</width>
-    <height>190</height>
+    <height>220</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -153,6 +153,32 @@
      <string>Cubic</string>
     </property>
    </item>
+  </widget>
+  <widget class="QLabel" name="labelCompression">
+   <property name="geometry">
+    <rect>
+     <x>10</x>
+     <y>146</y>
+     <width>180</width>
+     <height>16</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string>Compression (GeoTIFF/COG):</string>
+   </property>
+  </widget>
+  <widget class="QComboBox" name="comboBoxCompression">
+   <property name="geometry">
+    <rect>
+     <x>195</x>
+     <y>142</y>
+     <width>160</width>
+     <height>24</height>
+    </rect>
+   </property>
+   <property name="toolTip">
+    <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Compression of the exported GeoTIFF / COG. DEFLATE and ZSTD are lossless; JPEG and WEBP are lossy (much smaller files, photographic content). JPEG cannot store the alpha band added by the north-up warp: DEFLATE is used instead in that case. If this GDAL build lacks a codec, DEFLATE is used as a fallback.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+   </property>
   </widget>
  </widget>
  <resources/>

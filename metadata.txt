@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.9.7
+version = 0.9.8
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,19 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.8
+        * NEW: compression choice for the GeoTIFF / COG exports in the
+          export dialog: DEFLATE (lossless, default), ZSTD (lossless,
+          faster / usually smaller), JPEG and WEBP (lossy, much smaller
+          files for photographic content)
+        * The chosen codec is validated against the actual GDAL build
+          and the raster characteristics; incompatible combinations
+          (e.g. JPEG with the alpha band added by the north-up warp -
+          GDAL would drop that band silently) fall back to DEFLATE with
+          a warning message instead of producing a corrupted export
+        * NEW: horizontal PREDICTOR for the lossless codecs (STANDARD
+          for integer rasters, FLOATING_POINT for float rasters),
+          typically 10-30% smaller DEFLATE output at no quality cost
     0.9.7
         * NEW: selectable fit model in the tie points panel, like the
           transformation type of the built-in QGIS georeferencer:
