@@ -345,3 +345,256 @@ def residuals(pairs, params, w, h):
     sq = [(rx * rx + ry * ry) for rx, ry in res]
     rms = math.sqrt(sum(sq) / len(sq))
     return res, rms
+
+
+# ---------------------------------------------------------------------------
+# Polynomial transforms (order 1 = affine, 2 = quadratic, 3 = cubic)
+#
+# The polynomials map PIXEL offsets from the image center (Y-up frame, the
+# same convention as the fits above) to map coordinates:
+#     X = sum(cX_k * M_k(x, y)),  Y = sum(cY_k * M_k(x, y))
+# with the monomial basis
+#     order 1: (1, x, y)
+#     order 2: (1, x, y, x^2, xy, y^2)
+#     order 3: (1, x, y, x^2, xy, y^2, x^3, x^2 y, x y^2, y^3)
+# Both coordinates share the basis but have independent coefficients
+# (stored flat: first the X coefficients, then the Y ones).
+# ---------------------------------------------------------------------------
+
+POLY_ORDERS = (1, 2, 3)
+_POLY_BASIS = {
+    1: ((0, 0), (1, 0), (0, 1)),
+    2: ((0, 0), (1, 0), (0, 1), (2, 0), (1, 1), (0, 2)),
+    3: (
+        (0, 0),
+        (1, 0),
+        (0, 1),
+        (2, 0),
+        (1, 1),
+        (0, 2),
+        (3, 0),
+        (2, 1),
+        (1, 2),
+        (0, 3),
+    ),
+}
+
+
+def poly_num_coeffs(order):
+    """Number of coefficients per output coordinate for a polynomial order."""
+    if order not in _POLY_BASIS:
+        raise ValueError("Unsupported polynomial order: %r" % (order,))
+    return len(_POLY_BASIS[order])
+
+
+def poly_min_points(order):
+    """Minimum number of tie points required to fit a polynomial order."""
+    return poly_num_coeffs(order)
+
+
+def poly_monomials(x, y, order):
+    """Row of the monomial basis evaluated at (x, y)."""
+    basis = _POLY_BASIS[order]
+    return np.array(
+        [(x ** i) * (y ** j) for (i, j) in basis], dtype=float
+    )
+
+
+def fit_poly(order, pairs, w, h):
+    """
+    Least-squares (closed form) fit of a polynomial transform of the given
+    order. Returns dict(poly=order, coeffs=[...]) or None when there are
+    not enough points or the point configuration is degenerate (rank
+    deficient, e.g. collinear points for order 1).
+    """
+    if order not in _POLY_BASIS:
+        raise ValueError("Unsupported polynomial order: %r" % (order,))
+    n = len(pairs)
+    ncoeff = poly_num_coeffs(order)
+    if n < ncoeff:
+        return None
+    src, dst = _pairs_to_arrays(pairs, w, h)
+
+    # design matrix shared by both coordinates
+    rows = [poly_monomials(x, y, order) for x, y in src]
+    mat = np.vstack(rows)  # (N, ncoeff)
+    if np.linalg.matrix_rank(mat) < ncoeff:
+        return None
+
+    coeffs = []
+    for component in range(2):
+        target = dst[:, component]
+        sol, _, _, _ = np.linalg.lstsq(mat, target, rcond=None)
+        coeffs.extend(float(v) for v in sol)
+    return {"poly": order, "coeffs": coeffs}
+
+
+def poly_pixel_to_map(px, py, fit, w, h):
+    """Map coordinates of a (fractional) pixel center under a poly fit."""
+    icx = (w - 1) / 2.0
+    icy = (h - 1) / 2.0
+    x = px - icx
+    y = icy - py
+    order = fit["poly"]
+    row = poly_monomials(x, y, order)
+    coeffs = fit["coeffs"]
+    ncoeff = poly_num_coeffs(order)
+    cx = float(np.dot(row, coeffs[0:ncoeff]))
+    cy = float(np.dot(row, coeffs[ncoeff : 2 * ncoeff]))
+    return cx, cy
+
+
+def poly_map_to_pixel(x, y, fit, w, h, max_iter=30, tol=1e-10):
+    """
+    (Fractional) pixel coordinates of a map position: Newton iteration on
+    the polynomial, started from the affine equivalent at the image
+    center. Returns (px, py); may raise ValueError if it does not
+    converge (target far outside the raster footprint).
+    """
+    order = fit["poly"]
+    ncoeff = poly_num_coeffs(order)
+    coeffs = fit["coeffs"]
+    coeffsX = np.asarray(coeffs[0:ncoeff])
+    coeffsY = np.asarray(coeffs[ncoeff : 2 * ncoeff])
+    basis = _POLY_BASIS[order]
+    # derivative monomial indices for d/dx and d/dy (0 coefficient when the
+    # exponent is 0)
+    dxbasis = [(i - 1, j, i) for (i, j) in basis]
+    dybasis = [(i, j - 1, j) for (i, j) in basis]
+
+    icx = (w - 1) / 2.0
+    icy = (h - 1) / 2.0
+
+    def evalXY(x, y):
+        row = poly_monomials(x, y, order)
+        return float(np.dot(row, coeffsX)), float(np.dot(row, coeffsY))
+
+    def jacobian(x, y):
+        j00 = j01 = j10 = j11 = 0.0
+        for k, (i, j, m) in enumerate(dxbasis):
+            if m > 0:
+                v = m * (x ** i) * (y ** j)
+                j00 += v * coeffsX[k]
+                j10 += v * coeffsY[k]
+        for k, (i, j, m) in enumerate(dybasis):
+            if m > 0:
+                v = m * (x ** i) * (y ** j)
+                j01 += v * coeffsX[k]
+                j11 += v * coeffsY[k]
+        return j00, j01, j10, j11
+
+    # Newton starts at the image center (the centered Y-up frame works on
+    # (x, y) offsets, whose origin IS the image center)
+    x_c = 0.0
+    y_c = 0.0
+    for _ in range(max_iter):
+        fx, fy = evalXY(x_c, y_c)
+        rx = fx - x
+        ry = fy - y
+        if abs(rx) < tol and abs(ry) < tol:
+            break
+        j00, j01, j10, j11 = jacobian(x_c, y_c)
+        det = j00 * j11 - j01 * j10
+        if abs(det) < 1e-30:
+            raise ValueError("Singular Jacobian: cannot invert polynomial")
+        dx = (j11 * rx - j01 * ry) / det
+        dy = (-j10 * rx + j00 * ry) / det
+        x_c -= dx
+        y_c -= dy
+    else:
+        raise ValueError("Polynomial inversion did not converge")
+
+    return icx + x_c, icy - y_c
+
+
+def poly_local_params(fit, w, h):
+    """
+    Affine (classic) parameters equivalent to the polynomial locally at
+    the image center: position of the center and the Jacobian decomposed
+    into rotation + positive scales (no shear representation). Used to
+    show meaningful values in the numeric widgets and as export hints.
+    """
+    order = fit["poly"]
+    ncoeff = poly_num_coeffs(order)
+    coeffs = fit["coeffs"]
+    row = poly_monomials(0.0, 0.0, order)
+    cx = float(np.dot(row, coeffs[0:ncoeff]))
+    cy = float(np.dot(row, coeffs[ncoeff : 2 * ncoeff]))
+
+    # Jacobian at the center: derivative of the monomials at (0, 0)
+    j00 = j01 = j10 = j11 = 0.0
+    for k, (i, j) in enumerate(_POLY_BASIS[order]):
+        if i == 1:
+            j00 += coeffs[k]
+            j10 += coeffs[ncoeff + k]
+        if j == 1:
+            j01 += coeffs[k]
+            j11 += coeffs[ncoeff + k]
+    # J = R(theta) * diag(sx, sy) with Y-up math convention
+    sx = math.hypot(j00, j10)
+    sy = math.hypot(j01, j11)
+    theta = math.atan2(j10, j00)  # math CCW
+    rotation = -math.degrees(theta)  # visual CW degrees
+    return {
+        "cx": cx,
+        "cy": cy,
+        "rotation": normalize_rotation(rotation),
+        "xScale": sx,
+        "yScale": sy,
+    }
+
+
+def poly_residuals(pairs, fit, w, h):
+    """Per-point residuals (target - predicted) for a poly fit + rms."""
+    if not pairs:
+        return [], 0.0
+    res = []
+    for px, py, mx, my in pairs:
+        ex, ey = poly_pixel_to_map(px, py, fit, w, h)
+        res.append((mx - ex, my - ey))
+    sq = [(rx * rx + ry * ry) for rx, ry in res]
+    rms = math.sqrt(sum(sq) / len(sq))
+    return res, rms
+
+
+def poly1_world_file(fit, w, h):
+    """
+    World file coefficients (a, d, b, e, c, f) of an order-1 polynomial
+    fit. The world file anchors pixel (0, 0) center:
+        X = a * col + b * row + c,  Y = d * col + e * row + f
+    """
+    if fit["poly"] != 1:
+        raise ValueError("poly1_world_file requires an order-1 fit")
+    ncoeff = poly_num_coeffs(1)
+    c00, c01, c02 = fit["coeffs"][0:ncoeff]
+    c10, c11, c12 = fit["coeffs"][ncoeff : 2 * ncoeff]
+    icx = (w - 1) / 2.0
+    icy = (h - 1) / 2.0
+    # centered Y-up -> pixel indices: x = px - icx, y = icy - py
+    a = c01
+    b = -c02
+    d = c11
+    e = -c12
+    c = c00 - a * icx - b * icy
+    f = c10 - d * icx - e * icy
+    return (a, d, b, e, c, f)
+
+
+def affine_from_correspondences(src, dst):
+    """
+    Least-squares affine (6 parameters) mapping src points to dst points.
+    src, dst: (N, 2) arrays. Returns (a, b, c, d, e, f) with
+        X = a*x + b*y + c,  Y = d*x + e*y + f
+    or None when degenerate.
+    """
+    n = len(src)
+    if n < 3:
+        return None
+    mat = np.column_stack([src[:, 0], src[:, 1], np.ones(n)])
+    if np.linalg.matrix_rank(mat) < 3:
+        return None
+    out = []
+    for component in range(2):
+        sol, _, _, _ = np.linalg.lstsq(mat, dst[:, component], rcond=None)
+        out.extend(float(v) for v in sol)
+    return tuple(out)

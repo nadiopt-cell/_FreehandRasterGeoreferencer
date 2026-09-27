@@ -22,17 +22,23 @@ Use the master branch:
 
 A legacy version for QGIS 2 is in the `qgis2` branch.
 
-# Features (v0.9.6)
+# Features (v0.9.7)
 
 - **Interactive georeferencing**: move, rotate, scale, adjust sides, georeference with 2 points — all with immediate visual feedback.
+- **Selectable fit model** (v0.9.7): a "Fit model" combo in the tie points panel selects the mathematical model fitted from the tie points, like the transformation type of the built-in QGIS Georeferencer:
+    - *Similarity / Anisotropic* (default): the model of the plugin layer — rotation + translation + uniform or separate X/Y scales, no shear; exact with 2 points.
+    - *Polynomial 1 (affine)*: rotation, translation, X/Y scales **and shear** (6 parameters, 3 points minimum); rendered and exported exactly.
+    - *Polynomial 2* and *Polynomial 3*: quadratic / cubic warps (12 / 20 parameters, 6 / 10 points minimum) that can bend the raster — keep the points spread over the image; outside their hull polynomials extrapolate erratically.
+    - In polynomial mode the exact numeric controls are read-only (they display the affine equivalent at the image center) and the manual move / rotate / scale / 2-points tools are disabled: edit the tie points instead, the fit is redone after every change. The selected model and the coefficients are saved in the project and are covered by Undo.
 - **Exact numeric control** (v0.9.0, in the tie points panel since v0.9.6): the tie points panel (right side, opens automatically with the N-points tool or via the toolbar "Tie points panel" button) shows the exact numeric transform controls — the raster center (X/Y, map units), the pixel sizes (X/Y, map units per pixel) and the RMS — on top of the points table; the toolbar keeps a compact rotation spinbox. Values are updated both ways: edit them for an exact placement (moves / scales the raster immediately, undoable), or let the map tools update them.
-- **Georeference with N points** (v0.9.0): click on a feature of the raster, drag it to its real location and release; repeat for as many points as needed. With 2 points a similarity fit (rotation + uniform scale) is applied, with 3 points or more a least-squares anisotropic scaled-rotation fit. The root mean square (RMS) of the residuals is displayed in the tie points panel and the residuals of each point are drawn on the canvas. Right click on the map gives access to remove last point / clear all points / save / load the points.
+- **Georeference with N points** (v0.9.0): click on a feature of the raster, drag it to its real location and release; repeat for as many points as needed. With 2 points a similarity fit (rotation + uniform scale) is applied, with 3 points or more a least-squares anisotropic scaled-rotation fit (other models — polynomial 1/2/3 — can be selected in the panel since v0.9.7). The root mean square (RMS) of the residuals is displayed in the tie points panel and the residuals of each point are drawn on the canvas. Right click on the map gives access to remove last point / clear all points / save / load the points.
 - **Tie points table** (v0.9.3): a dock panel on the right side of the screen, like the GCP table of the built-in QGIS Georeferencer. Each point shows the source pixel, the target map coordinates and the live residuals (dX, dY, residual); each point can be **enabled / disabled** (a disabled point is excluded from the fit, like in the QGIS georeferencer) and rows can be **deleted** (multi-selection supported, or right-click menu in the table). After every change — canvas drag or table edit — the raster is refitted and redrawn immediately. The table opens automatically with the N-points tool and can be toggled with the toolbar button or menu Raster > Freehand Raster Georeferencer > Tie points table.
 - **Undo of any last action** (v0.9.5): the toolbar Undo button reverts the last action — moves, rotations, scale changes, 2-point georeferencing steps, but also every tie point operation: adding a point by drag, enabling / disabling a point in the table, deleting point(s), clearing all points and loading points from a file. Both the tie points and the raster placement are restored exactly as they were before the action (the target markers and the points table are refreshed accordingly).
 - **Tie points persistence** (v0.9.0): the tie points are stored in the QGIS project (they survive save/load, including reprojection when the project CRS changes) and can be exported to / imported from `.points` CSV files compatible with the built-in QGIS Georeferencer (menu Raster > Freehand Raster Georeferencer > Save/Load tie points). Since v0.9.3 the `.points` files follow the exact QGIS georeferencer format (`mapX,mapY,pixelX,pixelY,enable,dX,dY,residual`) including the enable flag; the legacy pixel-first format of earlier versions is still read.
 - **COG export** (v0.9.0): the export dialog can produce a Cloud Optimized GeoTIFF directly, built from the ORIGINAL raster file through GDAL — any band count or data type (16-bit, multispectral...) is preserved, the "pixel transformation" limitations of the display path do not apply. Two modes:
     - *north-up* (default): the rotation is baked into the pixels by warping on the 4 raster corners; the resampling method can be selected (nearest/bilinear/cubic); transparent borders are handled with an alpha band.
     - *"Put rotation in world file"* checked: the pixels are left untouched and the rotation is stored in the geotransform (ModelTransformation). If the GDAL version refuses to write a rotated COG, a tiled GeoTIFF is written instead (a warning is displayed).
+    - In polynomial mode (v0.9.7) the export warps the raster through a grid of GCPs sampled from the fitted polynomial, forcing the same polynomial order in GDAL (output: COG or tiled GeoTIFF); for polynomial 1 "only world file" also works, since an order-1 polynomial is an exact affine (for orders 2/3 a world file cannot encode the transform).
 - **Export** (world file / image): unchanged, with one fix: an existing `.aux.xml` next to the raster is not overwritten anymore (the CRS is simply not written into it).
 
 # Development
@@ -43,7 +49,7 @@ The transformation math lives in `transform_math.py` and the tie points serializ
 python3 -m pytest tests/
 ```
 
-The tests include GDAL integration tests of the COG export paths (they are skipped automatically if the GDAL python bindings are not available).
+The tests include GDAL integration tests of the COG export and polynomial warp export paths (they are skipped automatically if the GDAL python bindings are not available).
 
 # Documentation
 
@@ -56,7 +62,7 @@ Report issues at https://github.com/gvellut/FreehandRasterGeoreferencer/issues
 # Limitations
 
 - The plugin uses Qt to read and and manipulate a raster and is therefore limited to the formats supported by that library. That means almost none of the GDAL raster formats are supported and very large rasters should be avoided. Currently BMP, JPEG, PNG, TIFF can be loaded.
-- This georeferencer only supports affine transformations (without shearing) and not the full set of transformation algorithms (including rubbersheeting) the standard QGIS raster georeferencer provides
+- This georeferencer supports the scaled-rotation model of the layer and, since v0.9.7, polynomial transforms of order 1-3 (order 1 includes shear). Rubbersheeting / TPS of the standard QGIS raster georeferencer is still not provided
 - There is limited support for changing CRS: If the CRS of the map changes, you will have to adjust georeferencing of the layer in the new CRS.
 - The raster layer added by this plugin does not have all the capabilities of a normal QGIS raster layer: It is limited to visualization and modification using the provided tools. However, a normal QGIS raster file, along with georerencing information, can be easily exported by the plugin and can be reloaded using the standard "Add Raster" functionality.
 - The rendering of some TIFF rasters needs something more sophisticated than what the plugin offers. It is the case for example of rasters with a data type other than Byte (or 1-bit) or with a number of bands other than 1 (grayscale) or 3 (assumed to be RGB): Qt will not open them properly. To display those with the plugin, some simple pixel transformation is made, ie reduce the number of bands or scale the data to fit in a Byte but it is not as complete as what the raster renderer of QGIS offers.

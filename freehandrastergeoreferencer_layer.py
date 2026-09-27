@@ -9,6 +9,7 @@
  ***************************************************************************/
 """
 
+import json
 import math
 import os
 
@@ -41,7 +42,7 @@ from qgis.core import (
     QgsRectangle,
 )
 
-from . import gdal_utils, transform_math, tiepoints, utils
+from . import gdal_utils, polymesh, transform_math, tiepoints, utils
 from .loaderrordialog import LoadErrorDialog
 
 
@@ -81,6 +82,10 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         self.rotation = 0.0
         self.xScale = 1.0
         self.yScale = 1.0
+        # fit model: 0 = similarity / anisotropic scaled rotation,
+        # 1/2/3 = polynomial of that order (see transform_math)
+        self.fitModel = 0
+        self.polyCoeffs = None
 
         self.error = False
         self.initializing = False
@@ -120,6 +125,7 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         self.setCustomProperty("rotation", self.rotation)
         self.setCustomProperty("xCenter", self.center.x())
         self.setCustomProperty("yCenter", self.center.y())
+        self._storePolyState()
         self.transformParametersChanged.emit(
             (self.xScale, self.yScale, self.rotation, self.center)
         )
@@ -194,12 +200,53 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         return (self.center, self.rotation, self.xScale, self.yScale)
 
     # ------------------------------------------------------------------
+    # Fit model (classic similarity / anisotropic or polynomial 1-3)
+    # ------------------------------------------------------------------
+
+    def isPolyMode(self):
+        """True when a polynomial fit model (order >= 1) is selected."""
+        return self.fitModel in transform_math.POLY_ORDERS
+
+    def setFitModel(self, order):
+        """
+        Select the fit model (0 = classic, 1/2/3 = polynomial order) and
+        persist it. The coefficients are cleared: they are recomputed by
+        the next applyTiePointFit().
+        """
+        if order not in (0,) + transform_math.POLY_ORDERS:
+            order = 0
+        self.fitModel = int(order)
+        self.polyCoeffs = None
+        self._extent = None
+        self.setCustomProperty("fitModel", self.fitModel)
+        self.setCustomProperty("polyCoeffs", "")
+
+    def polyFit(self):
+        """The current polynomial fit as transform_math expects, or None."""
+        if self.isPolyMode() and self.polyCoeffs:
+            return {"poly": self.fitModel, "coeffs": list(self.polyCoeffs)}
+        return None
+
+    def _storePolyState(self):
+        self.setCustomProperty("fitModel", self.fitModel)
+        self.setCustomProperty(
+            "polyCoeffs",
+            json.dumps(self.polyCoeffs) if self.polyCoeffs is not None else "",
+        )
+
+    # ------------------------------------------------------------------
     # Coordinate conversions (pixel-center convention, like GDAL GCPs:
     # the center of the first pixel is (0, 0))
     # ------------------------------------------------------------------
 
     def pixelToMap(self, px, py):
         """Map coordinates of a (fractional) pixel center."""
+        w = self.image.width()
+        h = self.image.height()
+        fit = self.polyFit()
+        if fit is not None:
+            x, y = transform_math.poly_pixel_to_map(px, py, fit, w, h)
+            return QgsPointXY(x, y)
         x, y = transform_math.pixel_to_map(
             px,
             py,
@@ -208,13 +255,35 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
             self.rotation,
             self.xScale,
             self.yScale,
-            self.image.width(),
-            self.image.height(),
+            w,
+            h,
         )
         return QgsPointXY(x, y)
 
     def mapToPixel(self, x, y):
         """(Fractional) pixel coordinates of a map position."""
+        w = self.image.width()
+        h = self.image.height()
+        fit = self.polyFit()
+        if fit is not None:
+            try:
+                px, py = transform_math.poly_map_to_pixel(x, y, fit, w, h)
+                return px, py
+            except ValueError:
+                # far outside the raster footprint: fall back to the
+                # affine equivalent at the image center
+                local = transform_math.poly_local_params(fit, w, h)
+                return transform_math.map_to_pixel(
+                    x,
+                    y,
+                    local["cx"],
+                    local["cy"],
+                    local["rotation"],
+                    local["xScale"],
+                    local["yScale"],
+                    w,
+                    h,
+                )
         return transform_math.map_to_pixel(
             x,
             y,
@@ -223,8 +292,8 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
             self.rotation,
             self.xScale,
             self.yScale,
-            self.image.width(),
-            self.image.height(),
+            w,
+            h,
         )
 
     # ------------------------------------------------------------------
@@ -266,11 +335,17 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
 
     def tiePointResiduals(self):
         """(list of (dx, dy) residuals, rms) in map units for current params."""
+        pairs = [
+            (p["px"], p["py"], p["mx"], p["my"])
+            for p in self.tiePoints
+        ]
+        w = self.image.width()
+        h = self.image.height()
+        fit = self.polyFit()
+        if fit is not None:
+            return transform_math.poly_residuals(pairs, fit, w, h)
         return transform_math.residuals(
-            [
-                (p["px"], p["py"], p["mx"], p["my"])
-                for p in self.tiePoints
-            ],
+            pairs,
             {
                 "cx": self.center.x(),
                 "cy": self.center.y(),
@@ -278,28 +353,42 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
                 "xScale": self.xScale,
                 "yScale": self.yScale,
             },
-            self.image.width(),
-            self.image.height(),
+            w,
+            h,
         )
 
     def applyTiePointFit(self):
         """
-        Fit the transform parameters from the enabled tie points and apply
-        them. Returns True if a fit was applied (2 enabled points minimum).
+        Fit the transform from the enabled tie points according to the
+        selected fit model and apply it. Returns True if a fit was applied
+        (not enough points / degenerate configuration returns False and
+        leaves the current transform untouched).
         """
-        fit = transform_math.fit_points(
-            [
-                (p["px"], p["py"], p["mx"], p["my"])
-                for p in self.enabledTiePoints()
-            ],
-            self.image.width(),
-            self.image.height(),
-        )
-        if fit is None:
-            return False
-        self.setCenter(QgsPointXY(fit["cx"], fit["cy"]))
-        self.setRotation(fit["rotation"])
-        self.setScale(fit["xScale"], fit["yScale"])
+        pairs = [
+            (p["px"], p["py"], p["mx"], p["my"])
+            for p in self.enabledTiePoints()
+        ]
+        w = self.image.width()
+        h = self.image.height()
+
+        if self.isPolyMode():
+            fit = transform_math.fit_poly(self.fitModel, pairs, w, h)
+            if fit is None:
+                return False
+            self.polyCoeffs = list(fit["coeffs"])
+            # the classic parameters hold the affine equivalent at the
+            # image center (display in the numeric widgets, export hints)
+            local = transform_math.poly_local_params(fit, w, h)
+        else:
+            fit = transform_math.fit_points(pairs, w, h)
+            if fit is None:
+                return False
+            self.polyCoeffs = None
+            local = fit
+
+        self.setCenter(QgsPointXY(local["cx"], local["cy"]))
+        self.setRotation(local["rotation"])
+        self.setScale(local["xScale"], local["yScale"])
         self.repaint()
         self.commitTransformParameters()
         return True
@@ -549,6 +638,8 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         layer.rotation = self.rotation
         layer.xScale = self.xScale
         layer.yScale = self.yScale
+        layer.fitModel = self.fitModel
+        layer.polyCoeffs = list(self.polyCoeffs) if self.polyCoeffs else None
         layer.tiePoints = [dict(p) for p in self.tiePoints]
         layer.commitTransformParameters()
         return layer
@@ -572,6 +663,22 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
 
         if self._extent:
             return self._extent
+
+        if self.isPolyMode():
+            # warped footprint: sample the polynomial on a grid
+            fit = self.polyFit()
+            if fit is not None:
+                w = self.image.width()
+                h = self.image.height()
+                minX, minY, maxX, maxY = polymesh.warped_bounds(
+                    lambda px, py: transform_math.poly_pixel_to_map(
+                        px, py, fit, w, h
+                    ),
+                    w,
+                    h,
+                )
+                self._extent = QgsRectangle(minX, minY, maxX, maxY)
+                return self._extent
 
         topLeft, topRight, bottomRight, bottomLeft = self.cornerCoordinates()
 
@@ -705,6 +812,11 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
 
         self.map2pixel = renderContext.mapToPixel()
 
+        fit = self.polyFit()
+        if fit is not None:
+            self._drawRasterWarped(painter, fit)
+            return
+
         scaleX = self.xScale / self.map2pixel.mapUnitsPerPixel()
         scaleY = self.yScale / self.map2pixel.mapUnitsPerPixel()
 
@@ -729,6 +841,33 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         painter.setPen(pen)
         painter.drawRect(rect)
 
+    def _drawRasterWarped(self, painter, fit):
+        """Polynomial mode: draw the raster warped by the polynomial."""
+        w = self.image.width()
+        h = self.image.height()
+
+        def pixel_to_map_fn(px, py):
+            return transform_math.poly_pixel_to_map(px, py, fit, w, h)
+
+        def map_to_device_fn(mx, my):
+            pt = self.map2pixel.transform(QgsPointXY(mx, my))
+            return pt.x(), pt.y()
+
+        polymesh.draw_warped_raster(painter, self.image, pixel_to_map_fn, map_to_device_fn, w, h)
+
+        # warped image border
+        painter.save()
+        painter.resetTransform()
+        painter.setOpacity(1.0)
+        painter.setBrush(Qt.NoBrush)
+        pen = QPen()
+        pen.setColor(QColor(0, 0, 0))
+        pen.setWidth(3)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        polymesh.draw_warped_outline(painter, pixel_to_map_fn, map_to_device_fn, w, h)
+        painter.restore()
+
     def prepareStyle(self, painter):
         painter.setOpacity(1.0 - self.transparency / 100.0)
 
@@ -743,6 +882,18 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         yCenter = float(self.customProperty("yCenter", 0.0))
         self.center = QgsPointXY(xCenter, yCenter)
         self.tiePoints = tiepoints.from_json(self.customProperty("tiePoints", "[]"))
+        try:
+            self.fitModel = int(self.customProperty("fitModel", 0))
+        except (TypeError, ValueError):
+            self.fitModel = 0
+        if self.fitModel not in (0,) + transform_math.POLY_ORDERS:
+            self.fitModel = 0
+        try:
+            raw = self.customProperty("polyCoeffs", "")
+            coeffs = json.loads(raw) if raw else None
+            self.polyCoeffs = [float(v) for v in coeffs] if coeffs else None
+        except (TypeError, ValueError):
+            self.polyCoeffs = None
         self.setTransparency(
             int(self.customProperty("transparency", LayerDefaultSettings.TRANSPARENCY))
         )
@@ -791,6 +942,14 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         lines.append(fmt % (self.tr("Y center"), str(self.center.y())))
         lines.append(fmt % (self.tr("X scale"), str(self.xScale)))
         lines.append(fmt % (self.tr("Y scale"), str(self.yScale)))
+        if self.isPolyMode():
+            lines.append(
+                fmt % (self.tr("Fit model"), "polynomial %d" % self.fitModel)
+            )
+        else:
+            lines.append(
+                fmt % (self.tr("Fit model"), "similarity / anisotropic")
+            )
 
         return "\n".join(lines)
 

@@ -28,6 +28,7 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QDockWidget,
     QDoubleSpinBox,
     QGridLayout,
@@ -43,6 +44,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from . import transform_math
+
 try:  # scoped enums: PyQt6 style (also available in recent PyQt5)
     RIGHT_DOCK_AREA = Qt.DockWidgetArea.RightDockWidgetArea
     LEFT_DOCK_AREA = Qt.DockWidgetArea.LeftDockWidgetArea
@@ -53,6 +56,37 @@ except AttributeError:  # pragma: no cover - old PyQt5 fallback
 _HEADERS = ("", "Pixel X", "Pixel Y", "Map X", "Map Y", "dX", "dY", "Residual")
 _GRAY = QColor(128, 128, 128)
 
+# (order, label, tooltip)
+_FIT_MODELS = (
+    (
+        0,
+        "Similarity / Anisotropic",
+        "Default model of the layer: rotation + translation + uniform or"
+        " separate X/Y scales (no shear). Exact with 2 points.",
+    ),
+    (
+        1,
+        "Polynomial 1 (affine)",
+        "Affine transform: rotation, translation, X/Y scales AND shear"
+        " (6 parameters, 3 points minimum). Rendered and exported"
+        " exactly.",
+    ),
+    (
+        2,
+        "Polynomial 2 (quadratic)",
+        "Second order polynomial (12 parameters, 6 points minimum)."
+        " Can bend the raster; keep points spread over the image and"
+        " expect extrapolation artifacts outside their hull.",
+    ),
+    (
+        3,
+        "Polynomial 3 (cubic)",
+        "Third order polynomial (20 parameters, 10 points minimum)."
+        " Most flexible, least stable: use only with many well spread"
+        " points.",
+    ),
+)
+
 
 class GeorefPointsDockWidget(QDockWidget):
     """Table of tie points (enable / disable / remove, live residuals)."""
@@ -60,6 +94,7 @@ class GeorefPointsDockWidget(QDockWidget):
     pointToggled = pyqtSignal(int, bool)
     pointsDeleted = pyqtSignal(list)
     pointsCleared = pyqtSignal()
+    fitModelChanged = pyqtSignal(int)
 
     def __init__(self, parent=None):
         QDockWidget.__init__(self, "Georeference points", parent)
@@ -130,6 +165,28 @@ class GeorefPointsDockWidget(QDockWidget):
 
         layout.addWidget(self.groupTransform)
 
+        # fit model selector (kept OUTSIDE groupTransform: it stays active
+        # in polynomial mode when the exact numeric controls are read-only)
+        modelRow = QHBoxLayout()
+        modelRow.setContentsMargins(6, 0, 6, 0)
+        modelRow.addWidget(QLabel("Fit model"))
+        self.comboFitModel = QComboBox(content)
+        for order, label, tooltip in _FIT_MODELS:
+            self.comboFitModel.addItem(label, order)
+            self.comboFitModel.setItemData(
+                self.comboFitModel.count() - 1, tooltip, Qt.ToolTipRole
+            )
+        self.comboFitModel.setToolTip(
+            "Mathematical model used to fit the transform from the tie"
+            " points (like the QGIS georeferencer transformation type)."
+        )
+        self.comboFitModel.currentIndexChanged.connect(self._fitModelSelected)
+        self.labelFitModelHint = QLabel("", content)
+        self.labelFitModelHint.setStyleSheet("color: gray;")
+        modelRow.addWidget(self.comboFitModel, 1)
+        modelRow.addWidget(self.labelFitModelHint)
+        layout.addLayout(modelRow)
+
         buttons = QHBoxLayout()
         self.buttonDelete = QPushButton("Delete selected", content)
         self.buttonDelete.setToolTip("Remove the selected tie point(s)")
@@ -177,6 +234,32 @@ class GeorefPointsDockWidget(QDockWidget):
             self.labelRms.setText("")
         else:
             self.labelRms.setText("RMS: %.3f" % rms)
+
+    # ------------------------------------------------------------------
+    # fit model selector
+    # ------------------------------------------------------------------
+
+    def _fitModelSelected(self, index):
+        if self._updating:
+            return
+        self.fitModelChanged.emit(self.comboFitModel.itemData(index))
+
+    def setFitModelValue(self, order):
+        """Sync the combo with the layer (without emitting)."""
+        index = self.comboFitModel.findData(int(order))
+        if index < 0:
+            index = 0
+        if self.comboFitModel.currentIndex() != index:
+            self.comboFitModel.setCurrentIndex(index)
+        self._updateFitModelHint(order)
+
+    def _updateFitModelHint(self, order):
+        if order == 0:
+            self.labelFitModelHint.setText("")
+        else:
+            self.labelFitModelHint.setText(
+                "min %d points" % transform_math.poly_min_points(order)
+            )
 
     def updatePanel(self, layer, residuals=None):
         """
@@ -229,8 +312,16 @@ class GeorefPointsDockWidget(QDockWidget):
             )
             self.buttonDelete.setEnabled(bool(points))
             self.buttonClear.setEnabled(bool(points))
-            # the numeric transform controls follow the layer presence
-            self.groupTransform.setEnabled(layer is not None)
+            # the numeric transform controls follow the layer presence and
+            # are read-only in polynomial mode (they only DISPLAY the local
+            # equivalent values there)
+            polyMode = layer is not None and layer.isPolyMode()
+            self.groupTransform.setEnabled(layer is not None and not polyMode)
+            self.comboFitModel.setEnabled(layer is not None)
+            if layer is not None:
+                self.setFitModelValue(layer.fitModel)
+            else:
+                self.setFitModelValue(0)
         finally:
             self._updating = False
 

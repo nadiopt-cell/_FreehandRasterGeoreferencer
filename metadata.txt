@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.9.6
+version = 0.9.7
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,23 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.7
+        * NEW: selectable fit model in the tie points panel, like the
+          transformation type of the built-in QGIS georeferencer:
+          Similarity / Anisotropic (default), Polynomial 1 (affine,
+          adds shear), Polynomial 2 and Polynomial 3 (minimum 3 / 6 /
+          10 points)
+        * Polynomial 2/3 are rendered by warping the raster on a mesh of
+          affine cells and exported through a GDAL polynomial warp
+          (GeoTIFF or COG); Polynomial 1 is rendered / exported exactly
+          (also as a plain world file)
+        * The exact numeric controls become read-only in polynomial mode
+          (they display the affine equivalent at the image center) and
+          the manual move / rotate / scale / 2-points tools are disabled;
+          edit the tie points instead, the fit is redone after every
+          change
+        * The fit model and the polynomial coefficients are saved in the
+          QGIS project and included in the Undo history
     0.9.6
         * The exact numeric transform controls (center X/Y, pixel sizes
         X/Y, RMS) moved from the plugin toolbar into the tie points

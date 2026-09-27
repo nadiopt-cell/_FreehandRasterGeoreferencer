@@ -14,6 +14,8 @@ from PyQt5.QtGui import QPainter
 from qgis.core import QgsPointXY, QgsRectangle
 from qgis.gui import QgsMapCanvasItem
 
+from . import polymesh, transform_math
+
 
 class RasterShadowMapCanvasItem(QgsMapCanvasItem):
     def __init__(self, canvas):
@@ -61,6 +63,15 @@ class RasterShadowMapCanvasItem(QgsMapCanvasItem):
             self.update()
 
     def updateRect(self):
+        if self._polyActive():
+            minX, minY, maxX, maxY = polymesh.warped_bounds(
+                self._polyPixelToMap(),
+                self.layer.image.width(),
+                self.layer.image.height(),
+            )
+            self.setRect(QgsRectangle(minX, minY, maxX, maxY))
+            return
+
         topLeft, topRight, bottomRight, bottomLeft = self.cornerCoordinates()
 
         left = min(topLeft.x(), topRight.x(), bottomRight.x(), bottomLeft.x())
@@ -93,6 +104,37 @@ class RasterShadowMapCanvasItem(QgsMapCanvasItem):
             self.layer.yScale * self.fyscale,
         )
 
+    # ------------------------------------------------------------------
+    # polynomial mode helpers (used by the N-points tool drag preview)
+    # ------------------------------------------------------------------
+
+    def _polyActive(self):
+        return (
+            self.layer is not None
+            and self.layer.isPolyMode()
+            and self.layer.polyFit() is not None
+        )
+
+    def _polyPixelToMap(self):
+        """The layer polynomial shifted by the current drag displacement."""
+        fit = self.layer.polyFit()
+        w = self.layer.image.width()
+        h = self.layer.image.height()
+        dx = self.dx
+        dy = self.dy
+
+        def fn(px, py):
+            mx, my = transform_math.poly_pixel_to_map(px, py, fit, w, h)
+            return mx + dx, my + dy
+
+        return fn
+
+    def _mapToDeviceLocal(self, mx, my):
+        """Map coords to canvas-item local device coords."""
+        pt = self.toCanvasCoordinates(QgsPointXY(mx, my))
+        pos = self.pos()
+        return pt.x() - pos.x(), pt.y() - pos.y()
+
     def cornerCoordinatesFromPoint(self, startPoint):
         return self.layer.transformedCornerCoordinatesFromPoint(
             startPoint, self.drotation, 1, 1
@@ -106,6 +148,18 @@ class RasterShadowMapCanvasItem(QgsMapCanvasItem):
 
     def drawRaster(self, painter):
         mapUPerPixel = self.canvas.mapUnitsPerPixel()
+
+        if self._polyActive():
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            polymesh.draw_warped_raster(
+                painter,
+                self.layer.image,
+                self._polyPixelToMap(),
+                self._mapToDeviceLocal,
+                self.layer.image.width(),
+                self.layer.image.height(),
+            )
+            return
 
         scaleX = self.layer.xScale * self.fxscale / mapUPerPixel
         scaleY = self.layer.yScale * self.fyscale / mapUPerPixel
