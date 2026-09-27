@@ -12,7 +12,13 @@
 import os.path
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QAction, QDialog, QDoubleSpinBox, QFileDialog
+from PyQt5.QtWidgets import (
+    QAction,
+    QDialog,
+    QDoubleSpinBox,
+    QFileDialog,
+    QLabel,
+)
 from qgis.core import QgsApplication, QgsMapLayer, QgsPointXY, QgsProject
 
 from . import tiepoints, utils
@@ -243,6 +249,75 @@ class FreehandRasterGeoreferencer(object):
         self.toolbar.addAction(self.actionExport)
         self.toolbar.addAction(self.actionUndo)
 
+        # compact "values" toolbar: the exact numeric controls for move and
+        # scale, next to the tools like the rotation spinbox. It lives in
+        # its own narrow toolbar so it can be repositioned / hidden
+        # independently and never pushes the tool buttons behind the >>
+        # extension button of a crowded row (the reason why these controls
+        # had to leave the main toolbar in 0.9.6)
+        self.toolbarValues = self.iface.addToolBar(
+            "Freehand raster georeferencing values"
+        )
+        self.toolbarValues.setObjectName("FreehandRasterGeoreferencingValues")
+
+        def _valueSpin(minimum, maximum, step, objectName):
+            spinBox = QDoubleSpinBox(self.iface.mainWindow())
+            spinBox.setDecimals(6)
+            spinBox.setMinimum(minimum)
+            spinBox.setMaximum(maximum)
+            spinBox.setSingleStep(step)
+            spinBox.setKeyboardTracking(False)
+            spinBox.setFocusPolicy(Qt.ClickFocus)
+            spinBox.setFixedWidth(90)
+            spinBox.setObjectName(objectName)
+            return spinBox
+
+        self.spinBoxCenterX = _valueSpin(
+            -1e12, 1e12, 1.0, "FreehandRasterGeoreferencer_spinMoveX"
+        )
+        self.spinBoxCenterY = _valueSpin(
+            -1e12, 1e12, 1.0, "FreehandRasterGeoreferencer_spinMoveY"
+        )
+        self.spinBoxScaleX = _valueSpin(
+            1e-9, 1e9, 0.001, "FreehandRasterGeoreferencer_spinScaleX"
+        )
+        self.spinBoxScaleY = _valueSpin(
+            1e-9, 1e9, 0.001, "FreehandRasterGeoreferencer_spinScaleY"
+        )
+        self.spinBoxCenterX.setToolTip(
+            "Move X: X coordinate of the raster center (map units).\n"
+            "Type a value for an exact horizontal placement."
+        )
+        self.spinBoxCenterY.setToolTip(
+            "Move Y: Y coordinate of the raster center (map units).\n"
+            "Type a value for an exact vertical placement."
+        )
+        self.spinBoxScaleX.setToolTip(
+            "Scale X: pixel size in X, map units per pixel.\n"
+            "Type a value for an exact horizontal scale."
+        )
+        self.spinBoxScaleY.setToolTip(
+            "Scale Y: pixel size in Y, map units per pixel.\n"
+            "Type a value for an exact vertical scale."
+        )
+        self.labelMoveX = QLabel("Move X", self.toolbarValues)
+        self.labelMoveY = QLabel("Move Y", self.toolbarValues)
+        self.labelScaleX = QLabel("Scale X", self.toolbarValues)
+        self.labelScaleY = QLabel("Scale Y", self.toolbarValues)
+        self.toolbarValues.addWidget(self.labelMoveX)
+        self.toolbarValues.addWidget(self.spinBoxCenterX)
+        self.toolbarValues.addWidget(self.labelMoveY)
+        self.toolbarValues.addWidget(self.spinBoxCenterY)
+        self.toolbarValues.addSeparator()
+        self.toolbarValues.addWidget(self.labelScaleX)
+        self.toolbarValues.addWidget(self.spinBoxScaleX)
+        self.toolbarValues.addWidget(self.labelScaleY)
+        self.toolbarValues.addWidget(self.spinBoxScaleY)
+        self.spinBoxCenterX.valueChanged.connect(self.onToolbarCenterEdited)
+        self.spinBoxCenterY.valueChanged.connect(self.onToolbarCenterEdited)
+        self.spinBoxScaleX.valueChanged.connect(self.onToolbarPixelSizeEdited)
+        self.spinBoxScaleY.valueChanged.connect(self.onToolbarPixelSizeEdited)
+
         # Register plugin layer type
         self.layerType = FreehandRasterGeoreferencerLayerType(self)
         QgsApplication.pluginLayerRegistry().addPluginLayerType(self.layerType)
@@ -288,6 +363,11 @@ class FreehandRasterGeoreferencer(object):
             self.iface.mainWindow().removeDockWidget(self.dockPoints)
             self.dockPoints.deleteLater()
             self.dockPoints = None
+
+        # Remove the values toolbar
+        if getattr(self, "toolbarValues", None) is not None:
+            self.iface.mainWindow().removeToolBar(self.toolbarValues)
+            del self.toolbarValues
 
         # Remove the plugin menu item and icon
         self.iface.layerToolBar().removeAction(self.actionAddLayer)
@@ -374,6 +454,7 @@ class FreehandRasterGeoreferencer(object):
             self.actionLoadTiePoints.setEnabled(False)
             self.actionShowPointsDock.setEnabled(False)
             self.spinBoxRotate.setEnabled(False)
+            self._setValueSpinsEnabled(False)
             self._setTransformWidgets(0, 0, 0.0, 1.0, 1.0, None)
             if getattr(self, "dockPoints", None) is not None:
                 self.dockPoints.updatePanel(None)
@@ -636,18 +717,43 @@ class FreehandRasterGeoreferencer(object):
 
     # ------------------------------------------------------------------
     # Numeric control widgets (exact input of move / scale / rotation)
-    # The center / pixel size controls live in the tie points panel;
-    # only the rotation spinbox stays in the (compact) toolbar.
+    # The rotation spinbox stays in the (compact) main toolbar; the center
+    # / pixel size controls live in the dedicated "values" toolbar and,
+    # duplicated, in the tie points panel. All of them are kept in sync
+    # through _setTransformWidgets (guarded by the _syncing flag).
     # ------------------------------------------------------------------
 
     def _setTransformWidgets(self, cx, cy, rotation, xScale, yScale, rms):
         self._syncing = True
         try:
             self.spinBoxRotate.setValue(rotation)
+            for attr, value in (
+                ("spinBoxCenterX", cx),
+                ("spinBoxCenterY", cy),
+                ("spinBoxScaleX", xScale),
+                ("spinBoxScaleY", yScale),
+            ):
+                spinBox = getattr(self, attr, None)
+                if spinBox is not None:
+                    spinBox.setValue(value)
             if getattr(self, "dockPoints", None) is not None:
                 self.dockPoints.setTransformValues(cx, cy, xScale, yScale, rms)
         finally:
             self._syncing = False
+
+    def _setValueSpinsEnabled(self, enabled):
+        """Enable / disable the numeric move & scale controls of the values
+        toolbar (they are read-only in polynomial fit mode and without a
+        plugin layer, like the transform group of the tie points panel)."""
+        for attr in (
+            "spinBoxCenterX",
+            "spinBoxCenterY",
+            "spinBoxScaleX",
+            "spinBoxScaleY",
+        ):
+            spinBox = getattr(self, attr, None)
+            if spinBox is not None:
+                spinBox.setEnabled(enabled)
 
     def updateTransformWidgets(self, newParameters=None):
         """
@@ -656,6 +762,7 @@ class FreehandRasterGeoreferencer(object):
         """
         layer = getattr(self, "layer", None)
         if not layer or getattr(layer, "image", None) is None:
+            self._setValueSpinsEnabled(False)
             if getattr(self, "dockPoints", None) is not None:
                 self.dockPoints.updatePanel(None)
             return
@@ -665,6 +772,7 @@ class FreehandRasterGeoreferencer(object):
             residuals, rms = layer.tiePointResiduals()
             if len(layer.tiePoints) < 2:
                 rms = None
+        self._setValueSpinsEnabled(not layer.isPolyMode())
         self._setTransformWidgets(
             layer.center.x(),
             layer.center.y(),
@@ -677,32 +785,61 @@ class FreehandRasterGeoreferencer(object):
             self.dockPoints.updatePanel(layer, residuals)
 
     def onCenterEdited(self):
+        """Center edited in the tie points panel."""
         if self._syncing:
             return
+        if getattr(self, "dockPoints", None) is None:
+            return
+        self._applyCenter(
+            self.dockPoints.spinBoxCenterX.value(),
+            self.dockPoints.spinBoxCenterY.value(),
+        )
+
+    def onToolbarCenterEdited(self):
+        """Center edited in the values toolbar."""
+        if self._syncing:
+            return
+        self._applyCenter(
+            self.spinBoxCenterX.value(), self.spinBoxCenterY.value()
+        )
+
+    def _applyCenter(self, centerX, centerY):
         layer = self.layer
         if not layer or getattr(layer, "image", None) is None:
             return
         if layer.isPolyMode():
             # read-only display in polynomial mode (handled by the disabled
-            # group, this is a belt-and-braces guard)
+            # widgets, this is a belt-and-braces guard)
             return
         layer.history.append({"action": "move", "center": layer.center})
-        layer.setCenter(
-            QgsPointXY(
-                self.dockPoints.spinBoxCenterX.value(),
-                self.dockPoints.spinBoxCenterY.value(),
-            )
-        )
+        layer.setCenter(QgsPointXY(centerX, centerY))
         layer.repaint()
         layer.commitTransformParameters()
 
     def onPixelSizeEdited(self):
+        """Pixel size edited in the tie points panel."""
         if self._syncing:
             return
+        if getattr(self, "dockPoints", None) is None:
+            return
+        self._applyScale(
+            self.dockPoints.spinBoxPxX.value(),
+            self.dockPoints.spinBoxPxY.value(),
+        )
+
+    def onToolbarPixelSizeEdited(self):
+        """Pixel size edited in the values toolbar."""
+        if self._syncing:
+            return
+        self._applyScale(self.spinBoxScaleX.value(), self.spinBoxScaleY.value())
+
+    def _applyScale(self, scaleX, scaleY):
         layer = self.layer
         if not layer or getattr(layer, "image", None) is None:
             return
         if layer.isPolyMode():
+            # read-only display in polynomial mode (handled by the disabled
+            # widgets, this is a belt-and-braces guard)
             return
         layer.history.append(
             {
@@ -711,10 +848,7 @@ class FreehandRasterGeoreferencer(object):
                 "yScale": layer.yScale,
             }
         )
-        layer.setScale(
-            self.dockPoints.spinBoxPxX.value(),
-            self.dockPoints.spinBoxPxY.value(),
-        )
+        layer.setScale(scaleX, scaleY)
         layer.repaint()
         layer.commitTransformParameters()
 

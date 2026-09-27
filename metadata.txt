@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.9.9
+version = 0.9.10
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,16 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.10
+        * NEW: dedicated "values" toolbar with the exact numeric move and
+          scale controls next to the tools: Move X / Move Y (raster center
+          in map units) and Scale X / Scale Y (pixel size in map units per
+          pixel). Typing a value moves / scales the raster exactly, like
+          the rotation spinbox
+        * The numeric values follow every move / scale / rotate / tie
+          point change, stay in sync with the tie points panel and are
+          covered by Undo; in polynomial fit mode they are read-only
+          (like the transform group of the panel)
     0.9.9
         * FIX: in polynomial mode the raster image disappeared (only the
           warped outline was drawn) - the mesh rendering combined each
