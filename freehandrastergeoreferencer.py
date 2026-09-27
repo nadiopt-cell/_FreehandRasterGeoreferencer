@@ -12,7 +12,7 @@
 import os.path
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QAction, QDialog, QDoubleSpinBox, QFileDialog, QLabel
+from PyQt5.QtWidgets import QAction, QDialog, QDoubleSpinBox, QFileDialog
 from qgis.core import QgsApplication, QgsMapLayer, QgsPointXY, QgsProject
 
 from . import tiepoints, utils
@@ -150,8 +150,10 @@ class FreehandRasterGeoreferencer(object):
 
         self.actionShowPointsDock = QAction(
             self._icon("iconPointsTable.png"),
-            "Tie points table\nShow or hide the table of tie points "
-            "(enable / disable / remove points, live residuals).",
+            "Tie points panel\nShow or hide the panel with the table of "
+            "tie points (enable / disable / remove points, live "
+            "residuals) and the exact numeric transform controls "
+            "(center, pixel sizes, RMS).",
             self.iface.mainWindow(),
         )
         self.actionShowPointsDock.setObjectName(
@@ -219,39 +221,13 @@ class FreehandRasterGeoreferencer(object):
         self.spinBoxRotate.setKeyboardTracking(False)
         self.spinBoxRotate.valueChanged.connect(self.spinBoxRotateValueChangeEvent)
         self.spinBoxRotate.setFocusPolicy(Qt.ClickFocus)
+        self.spinBoxRotate.setFixedWidth(90)
         self.spinBoxRotate.focusInEvent = self.spinBoxRotateFocusInEvent
 
-        # numeric control widgets (exact input of move / scale)
-        self.spinBoxCenterX = self._createParamSpinBox(-1e12, 1e12, 6, 1.0)
-        self.spinBoxCenterY = self._createParamSpinBox(-1e12, 1e12, 6, 1.0)
-        self.spinBoxPxX = self._createParamSpinBox(1e-9, 1e9, 6, 0.001)
-        self.spinBoxPxY = self._createParamSpinBox(1e-9, 1e9, 6, 0.001)
-
-        self.spinBoxCenterX.setToolTip("X coordinate of the raster center (map units)")
-        self.spinBoxCenterY.setToolTip("Y coordinate of the raster center (map units)")
-        self.spinBoxPxX.setToolTip(
-            "Pixel size in X: map units per pixel of the raster (xScale)"
-        )
-        self.spinBoxPxY.setToolTip(
-            "Pixel size in Y: map units per pixel of the raster (yScale)"
-        )
-
-        self.spinBoxCenterX.valueChanged.connect(self.onCenterEdited)
-        self.spinBoxCenterY.valueChanged.connect(self.onCenterEdited)
-        self.spinBoxPxX.valueChanged.connect(self.onPixelSizeEdited)
-        self.spinBoxPxY.valueChanged.connect(self.onPixelSizeEdited)
-
-        self.labelCenterX = QLabel("X:", self.iface.mainWindow())
-        self.labelCenterY = QLabel("Y:", self.iface.mainWindow())
-        self.labelPxX = QLabel("Px X:", self.iface.mainWindow())
-        self.labelPxY = QLabel("Px Y:", self.iface.mainWindow())
-        self.labelRms = QLabel("", self.iface.mainWindow())
-        self.labelRms.setToolTip(
-            "Root mean square residual of the tie points, in map units "
-            "(shown when 2 or more tie points are set)"
-        )
-
-        # create toolbar for this plugin
+        # create toolbar for this plugin (kept compact: the exact numeric
+        # controls live in the tie points panel, which is always visible
+        # when open - a crowded toolbar hides its tail behind the >>
+        # extension button)
         self.toolbar = self.iface.addToolBar("Freehand raster georeferencing")
         self.toolbar.addAction(self.actionAddLayer)
         self.toolbar.addAction(self.actionMoveRaster)
@@ -262,19 +238,10 @@ class FreehandRasterGeoreferencer(object):
         self.toolbar.addAction(self.actionGeoref2PRaster)
         self.toolbar.addAction(self.actionGeorefNPRaster)
         self.toolbar.addAction(self.actionShowPointsDock)
-        self.toolbar.addWidget(self.labelCenterX)
-        self.toolbar.addWidget(self.spinBoxCenterX)
-        self.toolbar.addWidget(self.labelCenterY)
-        self.toolbar.addWidget(self.spinBoxCenterY)
-        self.toolbar.addWidget(self.labelPxX)
-        self.toolbar.addWidget(self.spinBoxPxX)
-        self.toolbar.addWidget(self.labelPxY)
-        self.toolbar.addWidget(self.spinBoxPxY)
         self.toolbar.addAction(self.actionDecreaseTransparency)
         self.toolbar.addAction(self.actionIncreaseTransparency)
         self.toolbar.addAction(self.actionExport)
         self.toolbar.addAction(self.actionUndo)
-        self.toolbar.addWidget(self.labelRms)
 
         # Register plugin layer type
         self.layerType = FreehandRasterGeoreferencerLayerType(self)
@@ -297,7 +264,8 @@ class FreehandRasterGeoreferencer(object):
         self.georefNPTool.setAction(self.actionGeorefNPRaster)
         self.currentTool = None
 
-        # tie points table dock (QGIS georeferencer style GCP table)
+        # tie points panel (QGIS georeferencer style GCP table + exact
+        # numeric transform controls)
         self.dockPoints = GeorefPointsDockWidget(self.iface.mainWindow())
         self.iface.addDockWidget(RIGHT_DOCK_AREA, self.dockPoints)
         self.dockPoints.hide()
@@ -305,6 +273,10 @@ class FreehandRasterGeoreferencer(object):
         self.dockPoints.pointToggled.connect(self.dockPointToggled)
         self.dockPoints.pointsDeleted.connect(self.dockPointsDeleted)
         self.dockPoints.pointsCleared.connect(self.dockPointsCleared)
+        self.dockPoints.spinBoxCenterX.valueChanged.connect(self.onCenterEdited)
+        self.dockPoints.spinBoxCenterY.valueChanged.connect(self.onCenterEdited)
+        self.dockPoints.spinBoxPxX.valueChanged.connect(self.onPixelSizeEdited)
+        self.dockPoints.spinBoxPxY.valueChanged.connect(self.onPixelSizeEdited)
 
         # default state for toolbar
         self.checkCurrentLayerIsPluginLayer()
@@ -370,10 +342,6 @@ class FreehandRasterGeoreferencer(object):
             self.actionLoadTiePoints.setEnabled(True)
             self.actionShowPointsDock.setEnabled(True)
             self.spinBoxRotate.setEnabled(True)
-            self.spinBoxCenterX.setEnabled(True)
-            self.spinBoxCenterY.setEnabled(True)
-            self.spinBoxPxX.setEnabled(True)
-            self.spinBoxPxY.setEnabled(True)
             try:
                 # self.layer is the previously selected layer
                 # in case it was a FRGR layer, disconnect the widgets
@@ -405,10 +373,6 @@ class FreehandRasterGeoreferencer(object):
             self.actionLoadTiePoints.setEnabled(False)
             self.actionShowPointsDock.setEnabled(False)
             self.spinBoxRotate.setEnabled(False)
-            self.spinBoxCenterX.setEnabled(False)
-            self.spinBoxCenterY.setEnabled(False)
-            self.spinBoxPxX.setEnabled(False)
-            self.spinBoxPxY.setEnabled(False)
             self._setTransformWidgets(0, 0, 0.0, 1.0, 1.0, None)
             if getattr(self, "dockPoints", None) is not None:
                 self.dockPoints.updatePanel(None)
@@ -602,30 +566,16 @@ class FreehandRasterGeoreferencer(object):
 
     # ------------------------------------------------------------------
     # Numeric control widgets (exact input of move / scale / rotation)
+    # The center / pixel size controls live in the tie points panel;
+    # only the rotation spinbox stays in the (compact) toolbar.
     # ------------------------------------------------------------------
-
-    def _createParamSpinBox(self, minimum, maximum, decimals, step):
-        sb = QDoubleSpinBox(self.iface.mainWindow())
-        sb.setDecimals(decimals)
-        sb.setMinimum(minimum)
-        sb.setMaximum(maximum)
-        sb.setSingleStep(step)
-        sb.setKeyboardTracking(False)
-        sb.setFocusPolicy(Qt.ClickFocus)
-        return sb
 
     def _setTransformWidgets(self, cx, cy, rotation, xScale, yScale, rms):
         self._syncing = True
         try:
             self.spinBoxRotate.setValue(rotation)
-            self.spinBoxCenterX.setValue(cx)
-            self.spinBoxCenterY.setValue(cy)
-            self.spinBoxPxX.setValue(xScale)
-            self.spinBoxPxY.setValue(yScale)
-            if rms is None:
-                self.labelRms.setText("")
-            else:
-                self.labelRms.setText("RMS: %.3f" % rms)
+            if getattr(self, "dockPoints", None) is not None:
+                self.dockPoints.setTransformValues(cx, cy, xScale, yScale, rms)
         finally:
             self._syncing = False
 
@@ -664,7 +614,10 @@ class FreehandRasterGeoreferencer(object):
             return
         layer.history.append({"action": "move", "center": layer.center})
         layer.setCenter(
-            QgsPointXY(self.spinBoxCenterX.value(), self.spinBoxCenterY.value())
+            QgsPointXY(
+                self.dockPoints.spinBoxCenterX.value(),
+                self.dockPoints.spinBoxCenterY.value(),
+            )
         )
         layer.repaint()
         layer.commitTransformParameters()
@@ -682,7 +635,10 @@ class FreehandRasterGeoreferencer(object):
                 "yScale": layer.yScale,
             }
         )
-        layer.setScale(self.spinBoxPxX.value(), self.spinBoxPxY.value())
+        layer.setScale(
+            self.dockPoints.spinBoxPxX.value(),
+            self.dockPoints.spinBoxPxY.value(),
+        )
         layer.repaint()
         layer.commitTransformParameters()
 

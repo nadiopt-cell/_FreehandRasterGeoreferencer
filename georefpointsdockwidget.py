@@ -14,11 +14,14 @@ Dock widget with the table of tie points of the active Freehand Raster
 Georeferencer layer, similar to the GCP table of the QGIS built-in
 georeferencer.
 
-Every row shows the source pixel coordinates, the target map coordinates
-and the live residuals (dX, dY, residual) of a tie point. Each point can
-be enabled / disabled (a disabled point stays in the table but is excluded
-from the fit) and rows can be removed. After every change the raster is
-refitted and redrawn immediately by the plugin (signals below).
+The top section holds the exact numeric transform controls (center X/Y,
+pixel sizes X/Y, RMS of the residuals): type a value for an exact
+placement of the raster. Every row of the table shows the source pixel
+coordinates, the target map coordinates and the live residuals (dX, dY,
+residual) of a tie point. Each point can be enabled / disabled (a
+disabled point stays in the table but is excluded from the fit) and rows
+can be removed. After every change the raster is refitted and redrawn
+immediately by the plugin (signals below).
 """
 
 from PyQt5.QtCore import Qt, pyqtSignal
@@ -26,6 +29,9 @@ from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QDockWidget,
+    QDoubleSpinBox,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -68,6 +74,62 @@ class GeorefPointsDockWidget(QDockWidget):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
+        # exact numeric transform controls (center / pixel sizes / RMS)
+        self.groupTransform = QGroupBox("Transform (exact values)", content)
+        self.groupTransform.setToolTip(
+            "Exact placement of the raster: center in map units, pixel"
+            " sizes in map units per pixel. Editing a value moves /"
+            " scales the raster immediately (undoable with the Undo"
+            " toolbar button)."
+        )
+        grid = QGridLayout(self.groupTransform)
+        grid.setContentsMargins(6, 6, 6, 6)
+
+        def _paramSpinBox(minimum, maximum, step):
+            sb = QDoubleSpinBox(self.groupTransform)
+            sb.setDecimals(6)
+            sb.setMinimum(minimum)
+            sb.setMaximum(maximum)
+            sb.setSingleStep(step)
+            sb.setKeyboardTracking(False)
+            sb.setFocusPolicy(Qt.ClickFocus)
+            sb.setFixedWidth(110)
+            return sb
+
+        self.spinBoxCenterX = _paramSpinBox(-1e12, 1e12, 1.0)
+        self.spinBoxCenterY = _paramSpinBox(-1e12, 1e12, 1.0)
+        self.spinBoxPxX = _paramSpinBox(1e-9, 1e9, 0.001)
+        self.spinBoxPxY = _paramSpinBox(1e-9, 1e9, 0.001)
+        self.spinBoxCenterX.setToolTip(
+            "X coordinate of the raster center (map units)"
+        )
+        self.spinBoxCenterY.setToolTip(
+            "Y coordinate of the raster center (map units)"
+        )
+        self.spinBoxPxX.setToolTip(
+            "Pixel size in X: map units per pixel of the raster (xScale)"
+        )
+        self.spinBoxPxY.setToolTip(
+            "Pixel size in Y: map units per pixel of the raster (yScale)"
+        )
+
+        grid.addWidget(QLabel("Center X"), 0, 0)
+        grid.addWidget(self.spinBoxCenterX, 0, 1)
+        grid.addWidget(QLabel("Center Y"), 0, 2)
+        grid.addWidget(self.spinBoxCenterY, 0, 3)
+        grid.addWidget(QLabel("Pixel size X"), 1, 0)
+        grid.addWidget(self.spinBoxPxX, 1, 1)
+        grid.addWidget(QLabel("Pixel size Y"), 1, 2)
+        grid.addWidget(self.spinBoxPxY, 1, 3)
+        self.labelRms = QLabel("", self.groupTransform)
+        self.labelRms.setToolTip(
+            "Root mean square residual of the tie points, in map units "
+            "(shown when 2 or more tie points are set)"
+        )
+        grid.addWidget(self.labelRms, 2, 0, 1, 4)
+
+        layout.addWidget(self.groupTransform)
+
         buttons = QHBoxLayout()
         self.buttonDelete = QPushButton("Delete selected", content)
         self.buttonDelete.setToolTip("Remove the selected tie point(s)")
@@ -103,6 +165,18 @@ class GeorefPointsDockWidget(QDockWidget):
     # ------------------------------------------------------------------
     # public API (called by the plugin)
     # ------------------------------------------------------------------
+
+    def setTransformValues(self, cx, cy, xScale, yScale, rms):
+        """Sync the numeric transform widgets with the layer (the plugin
+        guards its handlers with the _syncing flag while updating)."""
+        self.spinBoxCenterX.setValue(cx)
+        self.spinBoxCenterY.setValue(cy)
+        self.spinBoxPxX.setValue(xScale)
+        self.spinBoxPxY.setValue(yScale)
+        if rms is None:
+            self.labelRms.setText("")
+        else:
+            self.labelRms.setText("RMS: %.3f" % rms)
 
     def updatePanel(self, layer, residuals=None):
         """
@@ -155,6 +229,8 @@ class GeorefPointsDockWidget(QDockWidget):
             )
             self.buttonDelete.setEnabled(bool(points))
             self.buttonClear.setEnabled(bool(points))
+            # the numeric transform controls follow the layer presence
+            self.groupTransform.setEnabled(layer is not None)
         finally:
             self._updating = False
 

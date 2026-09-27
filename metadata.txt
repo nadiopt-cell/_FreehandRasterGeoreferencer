@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.9.5
+version = 0.9.6
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,17 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.6
+        * The exact numeric transform controls (center X/Y, pixel sizes
+        X/Y, RMS) moved from the plugin toolbar into the tie points
+        panel, on top of the table. A crowded toolbar hides its tail
+        behind the >> extension button, so these widgets could be
+        invisible on smaller screens; in the panel they are always
+        visible. The panel opens automatically with the N-points tool
+        and via the toolbar "Tie points panel" button; editing a value
+        moves / scales the raster immediately and is undoable
+        * The plugin toolbar is now compact (rotation spinbox stays),
+        all its buttons fit without overflow
     0.9.5
         * Reverted the two-click picking experiment of 0.9.4: the
           N-points tool is back to the drag interaction of 0.9.3
