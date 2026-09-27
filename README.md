@@ -22,7 +22,12 @@ Use the master branch:
 
 A legacy version for QGIS 2 is in the `qgis2` branch.
 
-# Features (v0.9.10)
+## Requirements
+
+- QGIS 3 (PyQt5), GDAL python bindings (`osgeo`) for the COG / polynomial exports and the display path of non-Byte / multi-band TIFFs
+- **numpy** — used by the transformation math and the raster display path; it ships with QGIS on the standard Windows and macOS installers, on Linux it comes with `python3-numpy`
+
+# Features (v0.9.11)
 
 - **Interactive georeferencing**: move, rotate, scale, adjust sides, georeference with 2 points — all with immediate visual feedback.
 - **Selectable fit model** (v0.9.7): a "Fit model" combo in the tie points panel selects the mathematical model fitted from the tie points, like the transformation type of the built-in QGIS Georeferencer:
@@ -41,6 +46,7 @@ A legacy version for QGIS 2 is in the `qgis2` branch.
     - In polynomial mode (v0.9.7) the export warps the raster through a grid of GCPs sampled from the fitted polynomial, forcing the same polynomial order in GDAL (output: COG or tiled GeoTIFF); for polynomial 1 "only world file" also works, since an order-1 polynomial is an exact affine (for orders 2/3 a world file cannot encode the transform).
 - **Compression choice for GeoTIFF/COG exports** (v0.9.8): the export dialog offers DEFLATE (lossless, default), ZSTD (lossless, faster and usually smaller), JPEG and WEBP (lossy, much smaller files for photographic content). The requested codec is validated against the actual GDAL build and against the raster characteristics: JPEG never handles the alpha band (GDAL would drop it silently — the export falls back to DEFLATE with a warning, e.g. for north-up COGs where an alpha band is added), WEBP requires Byte with 3/4 bands. The lossless codecs get a horizontal PREDICTOR (STANDARD for integer rasters, FLOATING_POINT for float rasters), which typically reduces the DEFLATE size by 10-30%.
 - **Polynomial mesh rendering** (fixed in v0.9.9): the warped image is drawn as a grid of affine cells; each cell's transform is composed with the painter base transform (map rendering job or canvas item). An earlier build combined the cell transforms with each other, which made the raster disappear and leave only the warped outline.
+- **Stability hardening** (v0.9.11): the QImage built for non-Byte / multi-band TIFFs owns its pixel buffer (deep copy — an image referencing a garbage-collectible numpy buffer was the likely source of random QGIS crashes), GDAL datasets are closed right after use (no more locked source files on Windows / network shares), the map tools tolerate their layer being deleted mid-interaction and clean up their preview items when deactivated, the draw paths validate the image and canvas state and log errors instead of aborting, the undo history is capped (50 entries), `to_byte` no longer divides by zero on flat bands and the global CRS setting used for the PDF preview is always restored.
 - **Export** (world file / image): unchanged, with one fix: an existing `.aux.xml` next to the raster is not overwritten anymore (the CRS is simply not written into it).
 
 # Development

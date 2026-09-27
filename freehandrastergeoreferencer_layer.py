@@ -104,6 +104,20 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         self.xScale = xScale
         self.yScale = yScale
 
+    # ------------------------------------------------------------------
+    # Undo history
+    # ------------------------------------------------------------------
+
+    HISTORY_LIMIT = 50
+
+    def pushHistory(self, entry):
+        """Append an undo entry and cap the history length (an unbounded
+        history would slowly eat memory during long sessions)."""
+        self.history.append(entry)
+        excess = len(self.history) - self.HISTORY_LIMIT
+        if excess > 0:
+            del self.history[:excess]
+
     def setRotation(self, rotation):
         # 3 decimals ought to be enough for everybody
         rotation = round(rotation, 3)
@@ -178,7 +192,10 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
                 except Exception:
                     pass
                 try:
-                    QgsProject.instance().disconnect(removeCrsChangeHandler)
+                    # disconnect by signal, not the QObject-wide disconnect
+                    QgsProject.instance().layersRemoved.disconnect(
+                        removeCrsChangeHandler
+                    )
                 except Exception:
                     pass
 
@@ -422,12 +439,17 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
             if imageFormat == "pdf":
                 s = QSettings()
                 oldValidation = s.value("/Projections/defaultBehavior")
-                s.setValue(
-                    "/Projections/defaultBehavior", "useGlobal"
-                )  # for not asking about crs
-                layer = QgsRasterLayer(absPath, os.path.basename(absPath))
-                self.image = layer.previewAsImage(QSize(layer.width(), layer.height()))
-                s.setValue("/Projections/defaultBehavior", oldValidation)
+                try:
+                    s.setValue(
+                        "/Projections/defaultBehavior", "useGlobal"
+                    )  # for not asking about crs
+                    layer = QgsRasterLayer(absPath, os.path.basename(absPath))
+                    self.image = layer.previewAsImage(
+                        QSize(layer.width(), layer.height())
+                    )
+                finally:
+                    # always restore the global setting
+                    s.setValue("/Projections/defaultBehavior", oldValidation)
             else:
                 has_corrected = False
                 if imageFormat == "tif":
@@ -459,23 +481,27 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
                 # check if image already has georef info
                 # use GDAL
                 dataset = gdal.Open(absPath, gdal.GA_ReadOnly)
-                georef = None
-                if dataset:
-                    georef = dataset.GetGeoTransform()
+                try:
+                    georef = None
+                    if dataset:
+                        georef = dataset.GetGeoTransform()
 
-                if georef and not self.is_default_geotransform(georef):
-                    self.initializeExistingGeoreferencing(dataset, georef)
-                else:
-                    # init to default params
-                    self.setCenter(screenExtent.center())
-                    self.setRotation(0.0)
+                    if georef and not self.is_default_geotransform(georef):
+                        self.initializeExistingGeoreferencing(dataset, georef)
+                    else:
+                        # init to default params
+                        self.setCenter(screenExtent.center())
+                        self.setRotation(0.0)
 
-                    sw = screenExtent.width()
-                    sh = screenExtent.height()
+                        sw = screenExtent.width()
+                        sh = screenExtent.height()
 
-                    self.resetScale(sw, sh)
+                        self.resetScale(sw, sh)
 
-                    self.commitTransformParameters()
+                        self.commitTransformParameters()
+                finally:
+                    # close the dataset NOW (releases the file handle)
+                    dataset = None
 
     def preCheckImage(self, filepath):
         nbands, datatype, width, height = gdal_utils.format(filepath)
@@ -515,8 +541,13 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
                 format = QImage.Format_RGB888
                 bytesPerLine = 3 * width
 
-            # Byte
-            qImg = QImage(pixels, width, height, bytesPerLine, format)
+            # QImage(data, ...) does NOT take ownership of the buffer: it
+            # only stores a pointer to it. Without the deep copy below the
+            # numpy buffer would be garbage collected when this method
+            # returns and the image would read freed memory later
+            # (random segfaults at draw time). .copy() makes the QImage
+            # own its data; the local numpy array is released after that.
+            qImg = QImage(pixels, width, height, bytesPerLine, format).copy()
             self.image = qImg
 
             return True
@@ -617,14 +648,17 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         if ext == "pdf":
             s = QSettings()
             oldValidation = s.value("/Projections/defaultBehavior")
-            s.setValue(
-                "/Projections/defaultBehavior", "useGlobal"
-            )  # for not asking about crs
-            path = fileInfo.filePath()
-            baseName = fileInfo.baseName()
-            layer = QgsRasterLayer(path, baseName)
-            self.image = layer.previewAsImage(QSize(layer.width(), layer.height()))
-            s.setValue("/Projections/defaultBehavior", oldValidation)
+            try:
+                s.setValue(
+                    "/Projections/defaultBehavior", "useGlobal"
+                )  # for not asking about crs
+                path = fileInfo.filePath()
+                baseName = fileInfo.baseName()
+                layer = QgsRasterLayer(path, baseName)
+                self.image = layer.previewAsImage(QSize(layer.width(), layer.height()))
+            finally:
+                # always restore the global setting
+                s.setValue("/Projections/defaultBehavior", oldValidation)
         else:
             reader = QImageReader(filepath)
             self.image = reader.read()
@@ -798,11 +832,26 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
             qDebug("Drawing is skipped because nothing to draw.")
             return True
 
+        if self.image is None or self.image.isNull():
+            qDebug("Drawing is skipped because the image is not available.")
+            return True
+
         painter = renderContext.painter()
         painter.save()
-        self.prepareStyle(painter)
-        self.drawRaster(renderContext)
-        painter.restore()
+        try:
+            self.prepareStyle(painter)
+            self.drawRaster(renderContext)
+        except Exception as ex:
+            # an exception escaping the paint path inside the QGIS render
+            # thread can abort the rendering instead of showing a clean
+            # Python traceback: log it and keep QGIS alive
+            QgsMessageLog.logMessage(
+                "Error while drawing the raster: %r" % ex,
+                "FreehandRasterGeoreferencer",
+                Qgis.Warning,
+            )
+        finally:
+            painter.restore()
 
         return True
 
@@ -817,8 +866,16 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
             self._drawRasterWarped(painter, fit)
             return
 
-        scaleX = self.xScale / self.map2pixel.mapUnitsPerPixel()
-        scaleY = self.yScale / self.map2pixel.mapUnitsPerPixel()
+        mapUPerPixel = self.map2pixel.mapUnitsPerPixel()
+        if mapUPerPixel <= 0:
+            # degenerate map state (happens transiently while zooming)
+            return
+
+        scaleX = self.xScale / mapUPerPixel
+        scaleY = self.yScale / mapUPerPixel
+
+        if not (math.isfinite(scaleX) and math.isfinite(scaleY)):
+            return
 
         rect = QRectF(
             QPointF(-self.image.width() / 2.0, -self.image.height() / 2.0),

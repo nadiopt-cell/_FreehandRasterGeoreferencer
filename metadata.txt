@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.9.10
+version = 0.9.11
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,30 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.11
+        * Stability fixes against random QGIS crashes:
+        * FIX: the QImage built in preCheckImage (non-Byte / multi-band
+          TIFFs) now owns its pixel buffer (deep copy). The image used
+          to reference a numpy buffer that the garbage collector could
+          free at any time - the classic source of random segfaults at
+          draw time
+        * GDAL datasets are closed right after use: file handles are no
+          longer held until garbage collection (this also unlocks the
+          source file for the exports on Windows / network shares)
+        * The manual map tools ignore events when their layer is gone
+          and fully clean up their rubber bands / preview item when
+          deactivated; deleting a layer while a tool is active can no
+          longer crash
+        * isLayerVisible / setLayerVisible tolerate layers missing from
+          the layer tree
+        * The raster preview item and the map draw path validate the
+          image and the canvas state before painting and log errors
+          instead of aborting the render
+        * The undo history is capped at 50 entries
+        * to_byte no longer divides by zero on flat bands; the global
+          CRS setting used for the PDF preview is always restored
+        * numpy is documented as a requirement (it ships with QGIS on
+          the standard installers)
     0.9.10
         * NEW: dedicated "values" toolbar with the exact numeric move and
           scale controls next to the tools: Move X / Move Y (raster center

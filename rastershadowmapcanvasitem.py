@@ -63,6 +63,8 @@ class RasterShadowMapCanvasItem(QgsMapCanvasItem):
             self.update()
 
     def updateRect(self):
+        if self.layer is None:
+            return
         if self._polyActive():
             minX, minY, maxX, maxY = polymesh.warped_bounds(
                 self._polyPixelToMap(),
@@ -141,13 +143,31 @@ class RasterShadowMapCanvasItem(QgsMapCanvasItem):
         )
 
     def paint(self, painter, options, widget):
+        if self.layer is None:
+            # nothing to preview (reset state / layer removed)
+            return
         painter.save()
         self.prepareStyle(painter)
-        self.drawRaster(painter)
+        try:
+            self.drawRaster(painter)
+        except Exception:
+            # never let an exception escape a paint event: it can take
+            # down the whole application
+            pass
         painter.restore()
 
     def drawRaster(self, painter):
+        if (
+            self.layer is None
+            or getattr(self.layer, "image", None) is None
+            or self.layer.image.isNull()
+        ):
+            return
+
         mapUPerPixel = self.canvas.mapUnitsPerPixel()
+        if mapUPerPixel <= 0:
+            # degenerate canvas state
+            return
 
         if self._polyActive():
             painter.setRenderHint(QPainter.SmoothPixmapTransform, True)

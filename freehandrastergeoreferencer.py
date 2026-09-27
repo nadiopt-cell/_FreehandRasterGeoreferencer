@@ -589,7 +589,7 @@ class FreehandRasterGeoreferencer(object):
         """Snapshot the tie points, the fit model and the transform into
         the layer history BEFORE a points edit, so that Undo can restore
         everything."""
-        layer.history.append(
+        layer.pushHistory(
             {
                 "action": "npfit",
                 "center": layer.center,
@@ -811,7 +811,7 @@ class FreehandRasterGeoreferencer(object):
             # read-only display in polynomial mode (handled by the disabled
             # widgets, this is a belt-and-braces guard)
             return
-        layer.history.append({"action": "move", "center": layer.center})
+        layer.pushHistory({"action": "move", "center": layer.center})
         layer.setCenter(QgsPointXY(centerX, centerY))
         layer.repaint()
         layer.commitTransformParameters()
@@ -841,7 +841,7 @@ class FreehandRasterGeoreferencer(object):
             # read-only display in polynomial mode (handled by the disabled
             # widgets, this is a belt-and-braces guard)
             return
-        layer.history.append(
+        layer.pushHistory(
             {
                 "action": "scale",
                 "xScale": layer.xScale,
@@ -860,7 +860,7 @@ class FreehandRasterGeoreferencer(object):
             return
         if layer.isPolyMode():
             return
-        layer.history.append(
+        layer.pushHistory(
             {"action": "rotation", "rotation": layer.rotation, "center": layer.center}
         )
         layer.setRotation(val)
@@ -941,7 +941,7 @@ class FreehandRasterGeoreferencer(object):
                 duration=5,
             )
             return
-        layer.history.append(
+        layer.pushHistory(
             {
                 "action": "npfit",
                 "center": layer.center,

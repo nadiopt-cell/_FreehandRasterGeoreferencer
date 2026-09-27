@@ -34,17 +34,11 @@ except AttributeError:  # pragma: no cover - old PyQt5 fallback
     _LEFT_BUTTON = Qt.LeftButton
     _RIGHT_BUTTON = Qt.RightButton
 
+from .freehandrastergeoreferencer_maptools import (
+    isLayerVisible as _isLayerVisible,
+    setLayerVisible as _setLayerVisible,
+)
 from .rastershadowmapcanvasitem import RasterShadowMapCanvasItem
-
-
-def _isLayerVisible(iface, layer):
-    vl = iface.layerTreeView().layerTreeModel().rootGroup().findLayer(layer)
-    return vl.itemVisibilityChecked()
-
-
-def _setLayerVisible(iface, layer, visible):
-    vl = iface.layerTreeView().layerTreeModel().rootGroup().findLayer(layer)
-    vl.setItemVisibilityChecked(visible)
 
 
 class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
@@ -159,7 +153,7 @@ class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
 
         # undo entry (state before this point moves the raster; the
         # tie points snapshot lets Undo also remove the added point)
-        self.layer.history.append(
+        self.layer.pushHistory(
             {
                 "action": "npfit",
                 "center": self.layer.center,

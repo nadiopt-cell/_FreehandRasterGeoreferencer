@@ -22,14 +22,22 @@ from .utils import tryfloat
 
 
 def isLayerVisible(iface, layer):
+    if layer is None:
+        return False
     # TODO Really ???? See if there is something simpler
     vl = iface.layerTreeView().layerTreeModel().rootGroup().findLayer(layer)
+    if vl is None:
+        # layer not in the tree (already removed / not added yet)
+        return False
     return vl.itemVisibilityChecked()
 
 
 def setLayerVisible(iface, layer, visible):
+    if layer is None:
+        return
     vl = iface.layerTreeView().layerTreeModel().rootGroup().findLayer(layer)
-    vl.setItemVisibilityChecked(visible)
+    if vl is not None:
+        vl.setItemVisibilityChecked(visible)
 
 
 class MoveRasterMapTool(QgsMapToolEmitPoint):
@@ -65,7 +73,15 @@ class MoveRasterMapTool(QgsMapToolEmitPoint):
         self.rasterShadow.reset()
         self.layer = None
 
+    def deactivate(self):
+        QgsMapToolEmitPoint.deactivate(self)
+        # drop the rubber bands / shadow item and the layer reference when
+        # the tool is switched off (layer may be deleted right after)
+        self.reset()
+
     def canvasPressEvent(self, e):
+        if self.layer is None:
+            return
         self.startPoint = self.toMapCoordinates(e.pos())
         self.endPoint = self.startPoint
         self.isEmittingPoint = True
@@ -80,7 +96,7 @@ class MoveRasterMapTool(QgsMapToolEmitPoint):
         setLayerVisible(self.iface, self.layer, False)
 
         self.showDisplacement(self.startPoint, self.endPoint)
-        self.layer.history.append({"action": "move", "center": self.layer.center})
+        self.layer.pushHistory({"action": "move", "center": self.layer.center})
 
     def canvasReleaseEvent(self, e):
         self.isEmittingPoint = False
@@ -89,6 +105,10 @@ class MoveRasterMapTool(QgsMapToolEmitPoint):
         self.rubberBandExtent.reset(QgsWkbTypes.LineGeometry)
         self.rasterShadow.reset()
 
+        if self.layer is None or self.startPoint is None:
+            # no matching press (layer removed mid-drag / press went
+            # elsewhere)
+            return
         x = self.originalCenter.x() + self.endPoint.x() - self.startPoint.x()
         y = self.originalCenter.y() + self.endPoint.y() - self.startPoint.y()
         self.layer.setCenter(QgsPointXY(x, y))
@@ -167,12 +187,19 @@ class RotateRasterMapTool(QgsMapToolEmitPoint):
     def reset(self):
         self.startPoint = self.endPoint = None
         self.isEmittingPoint = False
+        self.startY = self.endY = None
         self.rubberBandExtent.reset(QgsWkbTypes.LineGeometry)
         self.rubberBandDisplacement.reset(QgsWkbTypes.LineGeometry)
         self.rasterShadow.reset()
         self.layer = None
 
+    def deactivate(self):
+        QgsMapToolEmitPoint.deactivate(self)
+        self.reset()
+
     def canvasPressEvent(self, e):
+        if self.layer is None:
+            return
         self.startY = e.pos().y()
         self.endY = self.startY
         self.isEmittingPoint = True
@@ -189,7 +216,7 @@ class RotateRasterMapTool(QgsMapToolEmitPoint):
         rotation = self.computeRotation()
         self.showRotation(rotation)
 
-        self.layer.history.append(
+        self.layer.pushHistory(
             {
                 "action": "rotation",
                 "rotation": self.layer.rotation,
@@ -204,6 +231,10 @@ class RotateRasterMapTool(QgsMapToolEmitPoint):
         self.rubberBandDisplacement.reset(QgsWkbTypes.LineGeometry)
         self.rasterShadow.reset()
 
+        if self.layer is None or self.startY is None:
+            # no matching press (layer removed mid-drag / press went
+            # elsewhere)
+            return
         rotation = self.computeRotation()
         if self.isRotationAroundPoint:
             self.layer.moveCenterFromPointRotate(self.startPoint, rotation, 1, 1)
@@ -298,7 +329,13 @@ class ScaleRasterMapTool(QgsMapToolEmitPoint):
         self.rasterShadow.reset()
         self.layer = None
 
+    def deactivate(self):
+        QgsMapToolEmitPoint.deactivate(self)
+        self.reset()
+
     def canvasPressEvent(self, e):
+        if self.layer is None:
+            return
         pressed_button = e.button()
         if pressed_button == 1:
             self.startPoint = e.pos()
@@ -315,7 +352,7 @@ class ScaleRasterMapTool(QgsMapToolEmitPoint):
 
             scaling = self.computeScaling()
             self.showScaling(*scaling)
-        self.layer.history.append(
+        self.layer.pushHistory(
             {
                 "action": "scale",
                 "xScale": self.layer.xScale,
@@ -324,12 +361,18 @@ class ScaleRasterMapTool(QgsMapToolEmitPoint):
         )
 
     def canvasReleaseEvent(self, e):
+        if self.layer is None:
+            return
         pressed_button = e.button()
         if pressed_button == 1:
             self.isEmittingPoint = False
 
             self.rubberBandExtent.reset(QgsWkbTypes.LineGeometry)
             self.rasterShadow.reset()
+
+            if self.startPoint is None:
+                # no matching left-button press
+                return
 
             xScale, yScale = self.computeScaling()
             self.layer.setScale(xScale * self.layer.xScale, yScale * self.layer.yScale)
@@ -442,7 +485,13 @@ class AdjustRasterMapTool(QgsMapToolEmitPoint):
         self.rasterShadow.reset()
         self.layer = None
 
+    def deactivate(self):
+        QgsMapToolEmitPoint.deactivate(self)
+        self.reset()
+
     def canvasPressEvent(self, e):
+        if self.layer is None:
+            return
         # find the side of the rectangle closest to the click and some data
         # necessary to compute the new cneter and scale
         topLeft, topRight, bottomRight, bottomLeft = self.layer.cornerCoordinates()
@@ -475,7 +524,7 @@ class AdjustRasterMapTool(QgsMapToolEmitPoint):
 
         adjustment = self.computeAdjustment()
         self.showAdjustment(*adjustment)
-        self.layer.history.append(
+        self.layer.pushHistory(
             {
                 "action": "adjust",
                 "center": self.layer.center,
@@ -513,6 +562,11 @@ class AdjustRasterMapTool(QgsMapToolEmitPoint):
         self.rubberBandExtent.reset(QgsWkbTypes.LineGeometry)
         self.rubberBandAdjustSide.reset(QgsWkbTypes.LineGeometry)
         self.rasterShadow.reset()
+
+        if self.layer is None or self.startPoint is None:
+            # no matching press (layer removed mid-drag / press went
+            # elsewhere)
+            return
 
         center, xScale, yScale = self.computeAdjustment()
         self.layer.setCenter(center)
@@ -636,6 +690,8 @@ class GeorefRasterBy2PointsMapTool(QgsMapToolEmitPoint):
         self.reset()
 
     def canvasPressEvent(self, e):
+        if self.layer is None:
+            return
         if self.firstPoint is None:
             self.startPoint = self.toMapCoordinates(e.pos())
             self.endPoint = self.startPoint
@@ -651,7 +707,7 @@ class GeorefRasterBy2PointsMapTool(QgsMapToolEmitPoint):
             setLayerVisible(self.iface, self.layer, False)
 
             self.showDisplacement(self.startPoint, self.endPoint)
-            self.layer.history.append(
+            self.layer.pushHistory(
                 {"action": "2pointsA", "center": self.layer.center}
             )
         else:
@@ -669,7 +725,7 @@ class GeorefRasterBy2PointsMapTool(QgsMapToolEmitPoint):
             rotation = self.computeRotation()
             xScale = yScale = self.computeScale()
             self.showRotationScale(rotation, xScale, yScale)
-            self.layer.history.append(
+            self.layer.pushHistory(
                 {
                     "action": "2pointsB",
                     "center": self.layer.center,
@@ -685,6 +741,11 @@ class GeorefRasterBy2PointsMapTool(QgsMapToolEmitPoint):
         self.rubberBandDisplacement.reset(QgsWkbTypes.LineGeometry)
         self.rubberBandExtent.reset(QgsWkbTypes.LineGeometry)
         self.rasterShadow.reset()
+
+        if self.layer is None or self.startPoint is None:
+            # no matching press (layer removed mid-drag / press went
+            # elsewhere)
+            return
 
         if self.firstPoint is None:
             x = self.originalCenter.x() + self.endPoint.x() - self.startPoint.x()
