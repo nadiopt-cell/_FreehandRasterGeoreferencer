@@ -120,10 +120,8 @@ class FreehandRasterGeoreferencer(object):
         self.actionGeorefNPRaster = QAction(
             self._icon("iconNPoints.png"),
             "Georeference raster with N points\n"
-            "Click a point on the raster, then click its correct location "
-            "on the map: the pair is added to the points table and the "
-            "raster moves immediately. Drag works too. "
-            "Right click: remove / save / load points. Esc: cancel.",
+            "Drag raster features to their real location. "
+            "Right click: remove / save / load points.",
             self.iface.mainWindow(),
         )
         self.actionGeorefNPRaster.setObjectName(
@@ -831,7 +829,3 @@ class FreehandRasterGeoreferencer(object):
                 layer.setScale(act["xScale"], act["yScale"])
             layer.repaint()
             layer.commitTransformParameters()
-            if self.currentTool and hasattr(self.currentTool, "refreshPoints"):
-                # redraw the target markers / residual links at the
-                # restored transform
-                self.currentTool.refreshPoints()

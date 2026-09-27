@@ -13,24 +13,13 @@
 Interactive georeferencing of a raster with an unlimited number of tie
 points.
 
-Workflow (like the classic QGIS georeferencer "add point" tool, but live):
-1. Left click on a feature of the raster: the source pixel is picked and
-   the raster is hidden so the map underneath is visible.
-2. Left click on the correct location on the map: the pair (source
-   pixel, target map position) is added to the tie points table and the
-   transform is refitted immediately - the raster moves to its newly
-   calculated position. The tool is then ready for the next pair.
-
-The drag gesture is also supported: press on a raster feature, drag it
-to its real location and release to create the pair in one gesture.
-A simple click (press + release without moving) never creates a point
-by itself: it only advances the two-click sequence.
-
-Esc cancels the pending source point. Right click opens a menu to remove
-the last point, clear all points or save/load the points to/from a
-.points file. Any number of points can be added; with 2 points a
-similarity fit is applied, with 3+ points a least-squares anisotropic
-scaled-rotation fit (the model of the layer).
+Workflow: click on a feature of the raster, drag it to its correct location
+and release. The pair is stored (pixel coordinates of the source + target
+map coordinates) and the transform is refitted immediately. Any number of
+points can be added; with 2 points a similarity fit is applied, with 3+
+points a least-squares anisotropic scaled-rotation fit (the model of the
+layer). Right click opens a menu to remove the last point, clear all
+points or save/load the points to/from a .points file.
 """
 
 from PyQt5.QtCore import Qt
@@ -41,14 +30,11 @@ from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand
 try:  # scoped enums: PyQt6 style (also available in recent PyQt5)
     _LEFT_BUTTON = Qt.MouseButton.LeftButton
     _RIGHT_BUTTON = Qt.MouseButton.RightButton
-    _ESC_KEY = Qt.Key.Key_Escape
 except AttributeError:  # pragma: no cover - old PyQt5 fallback
     _LEFT_BUTTON = Qt.LeftButton
     _RIGHT_BUTTON = Qt.RightButton
-    _ESC_KEY = Qt.Key_Escape
 
-# drag shorter than this (canvas pixels) is a simple click, not a drag
-_DRAG_THRESHOLD_PX = 4
+from .rastershadowmapcanvasitem import RasterShadowMapCanvasItem
 
 
 def _isLayerVisible(iface, layer):
@@ -62,26 +48,13 @@ def _setLayerVisible(iface, layer, visible):
 
 
 class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
-    """Two-click tie point picking: first click on the raster (source
-    pixel), second click on the map (target). The raster is refitted and
-    moved immediately after every pair. Drag press-move-release works
-    too; a plain click never adds a point on its own."""
-
-    _STATE_PICK_SOURCE = 0
-    _STATE_PICK_TARGET = 1
-
     def __init__(self, iface, plugin):
         self.iface = iface
         self.plugin = plugin
         self.canvas = iface.mapCanvas()
         QgsMapToolEmitPoint.__init__(self, self.canvas)
 
-        # pending source point (picked on the raster, waiting for target)
-        self.rubberBandPending = QgsRubberBand(self.canvas, self._pointGeometry())
-        self.rubberBandPending.setColor(Qt.yellow)
-        self.rubberBandPending.setIcon(QgsRubberBand.ICON_CIRCLE)
-        self.rubberBandPending.setIconSize(9)
-        self.rubberBandPending.setWidth(2)
+        self.rasterShadow = RasterShadowMapCanvasItem(self.canvas)
 
         # circles on the target positions
         self.rubberBandTargets = QgsRubberBand(self.canvas, self._pointGeometry())
@@ -95,17 +68,12 @@ class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
         self.rubberBandResiduals.setColor(Qt.red)
         self.rubberBandResiduals.setWidth(1)
 
-        # source -> cursor line while picking the target
+        # current drag line
         self.rubberBandDrag = QgsRubberBand(self.canvas, self._lineGeometry())
         self.rubberBandDrag.setColor(Qt.yellow)
         self.rubberBandDrag.setWidth(1)
 
-        self._wasLayerVisible = True
-        self._layerHidden = False
-        self._dragOngoing = False
-        self._dragStartScreenPos = None
-        self.pickState = self._STATE_PICK_SOURCE
-        self.pendingPixel = None
+        self.isLayerVisible = True
 
         self.reset()
 
@@ -134,23 +102,18 @@ class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
         self.layer = layer
 
     def reset(self):
-        """Cancel the pending point and clear the canvas decorations."""
-        self._cancelPending()
+        self.isDragging = False
+        self.startPoint = None
+        self.endPoint = None
+        self.rubberBandDrag.reset(self._lineGeometry())
         self.rubberBandResiduals.reset(self._lineGeometry())
         self.rubberBandTargets.reset(self._pointGeometry())
+        self.rasterShadow.reset()
         self.layer = None
 
     def deactivate(self):
         QgsMapToolEmitPoint.deactivate(self)
         self.reset()
-
-    def activate(self):
-        QgsMapToolEmitPoint.activate(self)
-        self._showHint(
-            "Click a point on the raster, then click its correct location "
-            "on the map. Right click: menu. Esc: cancel the current point.",
-            6,
-        )
 
     # ------------------------------------------------------------------
     # events
@@ -158,133 +121,80 @@ class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
 
     def canvasPressEvent(self, e):
         if e.button() == _RIGHT_BUTTON:
-            self._cancelPending()
             self._showContextMenu(e)
             return
         if e.button() != _LEFT_BUTTON:
             return
-        layer = self.layer
-        if layer is None or getattr(layer, "image", None) is None:
+        if self.layer is None:
             return
 
-        if self.pickState == self._STATE_PICK_SOURCE:
-            self._pickSource(e)
-        else:
-            self._pickTarget(e)
+        self.isDragging = True
+        self.startPoint = self.toMapCoordinates(e.pos())
+        self.endPoint = self.startPoint
+
+        self.isLayerVisible = _isLayerVisible(self.iface, self.layer)
+        _setLayerVisible(self.iface, self.layer, False)
+
+        self._showDrag(self.startPoint, self.endPoint)
 
     def canvasMoveEvent(self, e):
-        if self.pickState != self._STATE_PICK_TARGET or self.pendingPixel is None:
+        if not self.isDragging:
             return
-        layer = self.layer
-        if layer is None:
-            return
-        pos = self.toMapCoordinates(e.pos())
-        self.rubberBandDrag.reset(self._lineGeometry())
-        self.rubberBandDrag.addPoint(layer.pixelToMap(*self.pendingPixel), False)
-        self.rubberBandDrag.addPoint(QgsPointXY(pos), True)
-        self.rubberBandDrag.show()
+        self.endPoint = self.toMapCoordinates(e.pos())
+        self._showDrag(self.startPoint, self.endPoint)
 
     def canvasReleaseEvent(self, e):
-        if e.button() != _LEFT_BUTTON or not self._dragOngoing:
-            return
-        self._dragOngoing = False
-        if self.pickState != self._STATE_PICK_TARGET or self.layer is None:
-            return
-        # if the cursor barely moved since the source press, this was a
-        # simple click: keep waiting for the target click (a plain click
-        # never creates a pair by itself)
-        delta = e.pos() - self._dragStartScreenPos
-        if delta.manhattanLength() < _DRAG_THRESHOLD_PX:
-            return
-        self._createPair(self.toMapCoordinates(e.pos()))
-
-    def keyPressEvent(self, e):
-        if e.key() == _ESC_KEY and self.pickState == self._STATE_PICK_TARGET:
-            self._cancelPending()
-            self._showHint("Current tie point cancelled.", 3)
-            return
-        QgsMapToolEmitPoint.keyPressEvent(self, e)
-
-    # ------------------------------------------------------------------
-    # picking (two-click workflow)
-    # ------------------------------------------------------------------
-
-    def _pickSource(self, e):
-        layer = self.layer
-        pos = self.toMapCoordinates(e.pos())
-        px, py = layer.mapToPixel(pos.x(), pos.y())
-        # accept any click on the raster (pixel-center convention: the
-        # centers of the first/last pixels are 0 and size - 1)
-        if not (
-            -0.5 <= px <= layer.image.width() - 0.5
-            and -0.5 <= py <= layer.image.height() - 0.5
-        ):
-            self._showHint("Click on the raster layer to pick the source point.", 3)
+        if e.button() == _RIGHT_BUTTON or not self.isDragging:
             return
 
-        self.pendingPixel = (px, py)
-        self.pickState = self._STATE_PICK_TARGET
-        self._dragOngoing = True
-        self._dragStartScreenPos = e.pos()
-
-        # hide the raster so the map underneath (the target area) is
-        # visible; the source point stays marked on the canvas
-        self._wasLayerVisible = _isLayerVisible(self.iface, layer)
-        _setLayerVisible(self.iface, layer, False)
-        self._layerHidden = True
-
-        self.rubberBandPending.reset(self._pointGeometry())
-        self.rubberBandPending.addPoint(layer.pixelToMap(px, py), True)
-        self.rubberBandPending.show()
-
-    def _pickTarget(self, e):
-        self._dragOngoing = False
-        self._createPair(self.toMapCoordinates(e.pos()))
-
-    def _createPair(self, target):
-        """Store the pair (pending source pixel, target map position),
-        refit the transform from all the points and move the raster."""
-        layer = self.layer
-        if layer is None or self.pendingPixel is None:
-            return
-        px, py = self.pendingPixel
-        points = list(layer.tiePoints)
-        points.append({"px": px, "py": py, "mx": target.x(), "my": target.y()})
-        layer.setTiePoints(points)
-        # refit + undo entry + canvas markers + points table refresh
-        self.plugin._refitAfterPointsEdit(layer)
-
-        self._cancelPending()
-
-        message = "Tie point %d added" % len(points)
-        if len(points) >= 2:
-            _, rms = layer.tiePointResiduals()
-            message += " (RMS = %.3f map units)" % rms
-        else:
-            message += " - add one more point to place the raster"
-        self._showHint(message, 4)
-
-    def _cancelPending(self):
-        """Abort the current two-click sequence and restore the raster."""
-        layer = getattr(self, "layer", None)
-        if layer is not None and getattr(self, "_layerHidden", False):
-            _setLayerVisible(self.iface, layer, self._wasLayerVisible)
-        self._layerHidden = False
-        self._dragOngoing = False
-        self._dragStartScreenPos = None
-        self.pickState = self._STATE_PICK_SOURCE
-        self.pendingPixel = None
+        self.isDragging = False
         self.rubberBandDrag.reset(self._lineGeometry())
-        self.rubberBandPending.reset(self._pointGeometry())
+        self.rasterShadow.reset()
 
-    def _showHint(self, text, duration):
-        self.iface.messageBar().pushMessage(
-            "Freehand Raster Georeferencer", text, level=0, duration=duration
+        target = self.toMapCoordinates(e.pos())
+
+        # pixel of the pressed point, computed with the transform in effect
+        # BEFORE the refit
+        px, py = self.layer.mapToPixel(self.startPoint.x(), self.startPoint.y())
+
+        # undo entry (state before this point moves the raster)
+        self.layer.history.append(
+            {
+                "action": "npfit",
+                "center": self.layer.center,
+                "rotation": self.layer.rotation,
+                "xScale": self.layer.xScale,
+                "yScale": self.layer.yScale,
+            }
         )
+
+        points = list(self.layer.tiePoints)
+        points.append({"px": px, "py": py, "mx": target.x(), "my": target.y()})
+        self.layer.setTiePoints(points)
+        self.layer.applyTiePointFit()
+
+        _setLayerVisible(self.iface, self.layer, self.isLayerVisible)
+        self.layer.repaint()
+
+        self.refreshPoints()
 
     # ------------------------------------------------------------------
     # display
     # ------------------------------------------------------------------
+
+    def _showDrag(self, startPoint, endPoint):
+        self.rubberBandDrag.reset(self._lineGeometry())
+        self.rubberBandDrag.addPoint(QgsPointXY(startPoint), False)
+        self.rubberBandDrag.addPoint(QgsPointXY(endPoint), True)
+        self.rubberBandDrag.show()
+
+        self.rasterShadow.reset(self.layer)
+        self.rasterShadow.setDeltaDisplacement(
+            endPoint.x() - startPoint.x(),
+            endPoint.y() - startPoint.y(),
+            True,
+        )
+        self.rasterShadow.show()
 
     def refreshPoints(self):
         """Redraw target markers and residual links for all stored points."""
@@ -350,11 +260,12 @@ class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
             return
         points = list(self.layer.tiePoints)[:-1]
         self.layer.setTiePoints(points)
-        # refit (if still possible) + markers + points table refresh
-        self.plugin._refitAfterPointsEdit(self.layer)
+        if points:
+            self.layer.applyTiePointFit()
+        self.refreshPoints()
 
     def clearPoints(self):
         if self.layer is None:
             return
         self.layer.setTiePoints([])
-        self.plugin._refitAfterPointsEdit(self.layer)
+        self.refreshPoints()
