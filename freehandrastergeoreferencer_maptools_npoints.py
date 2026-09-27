@@ -157,7 +157,8 @@ class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
         # BEFORE the refit
         px, py = self.layer.mapToPixel(self.startPoint.x(), self.startPoint.y())
 
-        # undo entry (state before this point moves the raster)
+        # undo entry (state before this point moves the raster; the
+        # tie points snapshot lets Undo also remove the added point)
         self.layer.history.append(
             {
                 "action": "npfit",
@@ -165,6 +166,7 @@ class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
                 "rotation": self.layer.rotation,
                 "xScale": self.layer.xScale,
                 "yScale": self.layer.yScale,
+                "tiePoints": [dict(p) for p in self.layer.tiePoints],
             }
         )
 
@@ -258,14 +260,15 @@ class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
     def removeLastPoint(self):
         if self.layer is None or not self.layer.tiePoints:
             return
+        self.plugin._pushUndoPointsState(self.layer)
         points = list(self.layer.tiePoints)[:-1]
         self.layer.setTiePoints(points)
-        if points:
-            self.layer.applyTiePointFit()
-        self.refreshPoints()
+        # refit (if still possible) + markers + points table refresh
+        self.plugin._refitAfterPointsEdit(self.layer)
 
     def clearPoints(self):
         if self.layer is None:
             return
+        self.plugin._pushUndoPointsState(self.layer)
         self.layer.setTiePoints([])
-        self.refreshPoints()
+        self.plugin._refitAfterPointsEdit(self.layer)

@@ -185,7 +185,9 @@ class FreehandRasterGeoreferencer(object):
 
         self.actionUndo = QAction(
             self._icon("iconUndo.png"),
-            u"Undo",
+            u"Undo\nRevert the last action: move / rotate / scale / "
+            u"adjust, adding, enabling, deleting, clearing or loading "
+            u"tie points.",
             self.iface.mainWindow(),
         )
         self.actionUndo.triggered.connect(self.undo)
@@ -511,21 +513,24 @@ class FreehandRasterGeoreferencer(object):
             self.actionShowPointsDock.setChecked(visible)
             self.actionShowPointsDock.blockSignals(wasBlocked)
 
+    def _pushUndoPointsState(self, layer):
+        """Snapshot the tie points and the transform into the layer
+        history BEFORE a points edit, so that Undo can restore both."""
+        layer.history.append(
+            {
+                "action": "npfit",
+                "center": layer.center,
+                "rotation": layer.rotation,
+                "xScale": layer.xScale,
+                "yScale": layer.yScale,
+                "tiePoints": [dict(p) for p in layer.tiePoints],
+            }
+        )
+
     def _refitAfterPointsEdit(self, layer):
-        """Refit the transform from the tie points after a table edit and
-        redraw everything (undo entry is pushed only if the fit changed
-        the transform)."""
-        params = (layer.center, layer.rotation, layer.xScale, layer.yScale)
-        if layer.applyTiePointFit():
-            layer.history.append(
-                {
-                    "action": "npfit",
-                    "center": params[0],
-                    "rotation": params[1],
-                    "xScale": params[2],
-                    "yScale": params[3],
-                }
-            )
+        """Refit the transform from the tie points after a points edit
+        and redraw everything (the caller pushes the undo entry)."""
+        layer.applyTiePointFit()
         if isinstance(self.currentTool, GeorefRasterByNPointsMapTool):
             self.currentTool.refreshPoints()
         self.updateTransformWidgets()
@@ -536,6 +541,7 @@ class FreehandRasterGeoreferencer(object):
             return
         if not (0 <= row < len(layer.tiePoints)):
             return
+        self._pushUndoPointsState(layer)
         layer.setTiePointEnabled(row, enabled)
         self._refitAfterPointsEdit(layer)
 
@@ -543,22 +549,28 @@ class FreehandRasterGeoreferencer(object):
         layer = getattr(self, "layer", None)
         if not isinstance(layer, FreehandRasterGeoreferencerLayer):
             return
-        deleted = False
-        for row in sorted(rows, reverse=True):
-            if 0 <= row < len(layer.tiePoints):
-                layer.removeTiePoint(row)
-                deleted = True
-        if deleted:
-            self._refitAfterPointsEdit(layer)
+        valid = [
+            row
+            for row in sorted(rows)
+            if 0 <= row < len(layer.tiePoints)
+        ]
+        if not valid:
+            return
+        # one undo step for the whole multi-row deletion
+        self._pushUndoPointsState(layer)
+        for row in sorted(valid, reverse=True):
+            layer.removeTiePoint(row)
+        self._refitAfterPointsEdit(layer)
 
     def dockPointsCleared(self):
         layer = getattr(self, "layer", None)
         if not isinstance(layer, FreehandRasterGeoreferencerLayer):
             return
+        if not layer.tiePoints:
+            return
+        self._pushUndoPointsState(layer)
         layer.setTiePoints([])
-        if isinstance(self.currentTool, GeorefRasterByNPointsMapTool):
-            self.currentTool.refreshPoints()
-        self.updateTransformWidgets()
+        self._refitAfterPointsEdit(layer)
 
     def increaseTransparency(self):
         layer = self.iface.activeLayer()
@@ -768,6 +780,7 @@ class FreehandRasterGeoreferencer(object):
                 "rotation": layer.rotation,
                 "xScale": layer.xScale,
                 "yScale": layer.yScale,
+                "tiePoints": [dict(p) for p in layer.tiePoints],
             }
         )
         layer.setTiePoints(points)
@@ -805,27 +818,36 @@ class FreehandRasterGeoreferencer(object):
         if self.currentTool:
             self.currentTool.reset()  # for clear 2point rubberband
             self.currentTool.setLayer(layer)
-        if len(layer.history) > 0:
-            act = layer.history.pop()
-            if act["action"] == "move":
-                layer.setCenter(act["center"])
-            elif act["action"] == "scale":
-                layer.setScale(act["xScale"], act["yScale"])
-            elif act["action"] == "rotation":
-                layer.setRotation(act["rotation"])
-                layer.setCenter(act["center"])
-            elif act["action"] == "adjust":
-                layer.setCenter(act["center"])
-                layer.setScale(act["xScale"], act["yScale"])
-            elif act["action"] == "2pointsA":
-                layer.setCenter(act["center"])
-            elif act["action"] == "2pointsB":
-                layer.setRotation(act["rotation"])
-                layer.setCenter(act["center"])
-                layer.setScale(act["xScale"], act["yScale"])
-            elif act["action"] == "npfit":
-                layer.setCenter(act["center"])
-                layer.setRotation(act["rotation"])
-                layer.setScale(act["xScale"], act["yScale"])
-            layer.repaint()
-            layer.commitTransformParameters()
+        if layer is None or len(layer.history) == 0:
+            return
+        act = layer.history.pop()
+        if "tiePoints" in act:
+            # restore the tie points as they were before the action
+            # (add / toggle / delete / clear / load)
+            layer.setTiePoints([dict(p) for p in act["tiePoints"]])
+        if act["action"] == "move":
+            layer.setCenter(act["center"])
+        elif act["action"] == "scale":
+            layer.setScale(act["xScale"], act["yScale"])
+        elif act["action"] == "rotation":
+            layer.setRotation(act["rotation"])
+            layer.setCenter(act["center"])
+        elif act["action"] == "adjust":
+            layer.setCenter(act["center"])
+            layer.setScale(act["xScale"], act["yScale"])
+        elif act["action"] == "2pointsA":
+            layer.setCenter(act["center"])
+        elif act["action"] == "2pointsB":
+            layer.setRotation(act["rotation"])
+            layer.setCenter(act["center"])
+            layer.setScale(act["xScale"], act["yScale"])
+        elif act["action"] == "npfit":
+            layer.setCenter(act["center"])
+            layer.setRotation(act["rotation"])
+            layer.setScale(act["xScale"], act["yScale"])
+        layer.repaint()
+        layer.commitTransformParameters()
+        if self.currentTool and hasattr(self.currentTool, "refreshPoints"):
+            # redraw the target markers / residual links at the restored
+            # points and transform
+            self.currentTool.refreshPoints()

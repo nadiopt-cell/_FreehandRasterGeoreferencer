@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.9.3
+version = 0.9.5
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,18 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.5
+        * Reverted the two-click picking experiment of 0.9.4: the
+          N-points tool is back to the drag interaction of 0.9.3
+          (press on a raster feature, drag it to its real location,
+          release)
+        * NEW: the Undo toolbar button can now revert ANY last action.
+        Tie point operations are included - adding a point by drag,
+        enabling / disabling a point, deleting point(s), clearing all
+        points and loading points from a file: both the tie points and
+        the raster placement are restored as they were before
+        * The points table is also refreshed when points are removed or
+        cleared from the map tool right-click menu
     0.9.3
         * New tie points table dock (like the GCP table of the built-in
           QGIS georeferencer): each point can be enabled / disabled
