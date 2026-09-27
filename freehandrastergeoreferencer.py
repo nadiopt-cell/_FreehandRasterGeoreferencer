@@ -562,6 +562,19 @@ class FreehandRasterGeoreferencer(object):
         layer.repaint()
         layer.commitTransformParameters()
 
+    def spinBoxRotateValueChangeEvent(self, val):
+        if self._syncing:
+            return
+        layer = self.layer
+        if not layer or getattr(layer, "image", None) is None:
+            return
+        layer.history.append(
+            {"action": "rotation", "rotation": layer.rotation, "center": layer.center}
+        )
+        layer.setRotation(val)
+        layer.repaint()
+        layer.commitTransformParameters()
+
     # ------------------------------------------------------------------
     # Tie points save / load (QGIS georeferencer compatible .points CSV)
     # ------------------------------------------------------------------

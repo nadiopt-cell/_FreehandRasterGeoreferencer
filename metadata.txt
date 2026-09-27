@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.9.0
+version = 0.9.1
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,12 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.1
+        * FIX: plugin failed to load with AttributeError
+          (spinBoxRotateValueChangeEvent handler was missing after the
+          toolbar refactor; rotation typed in the spinbox applies again)
+        * Added a static self-attribute consistency check to the dev
+          toolchain to prevent this class of regression
     0.9.0
         * Export directly to Cloud Optimized GeoTIFF (COG), built from the
           original raster through GDAL (any band count / data type is
