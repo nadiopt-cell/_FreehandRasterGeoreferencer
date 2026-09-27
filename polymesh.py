@@ -89,6 +89,16 @@ def draw_warped_raster(
 
     painter.save()
     try:
+        # the cell affine maps image pixels to FINAL device coords; the
+        # painter base transform (identity for map rendering jobs, the
+        # canvas-item position translation for QgsMapCanvasItem painters)
+        # must stay on the outside: device = base(cell(image)).
+        # setTransform(cell, combine=True) must NOT be used inside this
+        # loop: combine multiplies with the matrix left by the PREVIOUS
+        # cell, so the transforms accumulate across the loop and only the
+        # first cell is drawn (the image disappears and only the outline
+        # remains). Qt product order: (cell * base).map(p) = base(cell(p)).
+        base = painter.transform()
         for i in range(nx):
             for j in range(ny):
                 x0, x1 = xs[i], xs[i + 1]
@@ -106,7 +116,9 @@ def draw_warped_raster(
                 a, b, c, d, e, f = affine
                 # QTransform maps (x, y) -> (m11*x + m21*y + dx,
                 # m12*x + m22*y + dy)
-                painter.setTransform(QTransform(a, d, b, e, c, f), True)
+                painter.setTransform(
+                    QTransform(a, d, b, e, c, f) * base
+                )
 
                 # source and target are the same image-coordinate rect;
                 # the QTransform does the warping. The small overlap into

@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.9.8
+version = 0.9.9
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,17 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.9
+        * FIX: in polynomial mode the raster image disappeared (only the
+          warped outline was drawn) - the mesh rendering combined each
+          cell's transform with the previous cell's one instead of the
+          painter base transform, so only the first mesh cell was
+          painted. The cell transforms are now composed with the painter
+          base explicitly; the drag preview of the N-points tool had the
+          same bug and is fixed too
+        * Added offscreen rendering tests that paint the mesh and check
+          the pixels of every cell (they run headlessly and are skipped
+          when PyQt5 is missing)
     0.9.8
         * NEW: compression choice for the GeoTIFF / COG exports in the
           export dialog: DEFLATE (lossless, default), ZSTD (lossless,
