@@ -12,11 +12,10 @@
 import os.path
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QAction, QDialog, QDoubleSpinBox
-from qgis.core import QgsApplication, QgsMapLayer, QgsProject
+from PyQt5.QtWidgets import QAction, QDialog, QDoubleSpinBox, QFileDialog, QLabel
+from qgis.core import QgsApplication, QgsMapLayer, QgsPointXY, QgsProject
 
-from . import resources_rc  # noqa
+from . import tiepoints, utils
 from .exportgeorefrasterdialog import ExportGeorefRasterDialog
 from .freehandrastergeoreferencer_commands import ExportGeorefRasterCommand
 from .freehandrastergeoreferencer_layer import (
@@ -30,6 +29,7 @@ from .freehandrastergeoreferencer_maptools import (
     RotateRasterMapTool,
     ScaleRasterMapTool,
 )
+from .freehandrastergeoreferencer_maptools_npoints import GeorefRasterByNPointsMapTool
 from .freehandrastergeoreferencerdialog import FreehandRasterGeoreferencerDialog
 
 
@@ -41,13 +41,18 @@ class FreehandRasterGeoreferencer(object):
         self.iface = iface
         self.plugin_dir = os.path.dirname(__file__)
         self.layers = {}
+        self.layer = None
+        self._syncing = False
         QgsProject.instance().layerRemoved.connect(self.layerRemoved)
         self.iface.currentLayerChanged.connect(self.currentLayerChanged)
+
+    def _icon(self, name):
+        return utils.plugin_icon(self.plugin_dir, name)
 
     def initGui(self):
         # Create actions
         self.actionAddLayer = QAction(
-            QIcon(":/plugins/freehandrastergeoreferencer/iconAdd.png"),
+            self._icon("iconAdd.png"),
             "Add raster for interactive georeferencing",
             self.iface.mainWindow(),
         )
@@ -57,7 +62,7 @@ class FreehandRasterGeoreferencer(object):
         self.actionAddLayer.triggered.connect(self.addLayer)
 
         self.actionMoveRaster = QAction(
-            QIcon(":/plugins/freehandrastergeoreferencer/iconMove.png"),
+            self._icon("iconMove.png"),
             "Move raster",
             self.iface.mainWindow(),
         )
@@ -68,7 +73,7 @@ class FreehandRasterGeoreferencer(object):
         self.actionMoveRaster.setCheckable(True)
 
         self.actionRotateRaster = QAction(
-            QIcon(":/plugins/freehandrastergeoreferencer/iconRotate.png"),
+            self._icon("iconRotate.png"),
             "Rotate raster",
             self.iface.mainWindow(),
         )
@@ -79,7 +84,7 @@ class FreehandRasterGeoreferencer(object):
         self.actionRotateRaster.setCheckable(True)
 
         self.actionScaleRaster = QAction(
-            QIcon(":/plugins/freehandrastergeoreferencer/iconScale.png"),
+            self._icon("iconScale.png"),
             "Scale raster",
             self.iface.mainWindow(),
         )
@@ -90,7 +95,7 @@ class FreehandRasterGeoreferencer(object):
         self.actionScaleRaster.setCheckable(True)
 
         self.actionAdjustRaster = QAction(
-            QIcon(":/plugins/freehandrastergeoreferencer/iconAdjust.png"),
+            self._icon("iconAdjust.png"),
             "Adjust sides of raster",
             self.iface.mainWindow(),
         )
@@ -101,7 +106,7 @@ class FreehandRasterGeoreferencer(object):
         self.actionAdjustRaster.setCheckable(True)
 
         self.actionGeoref2PRaster = QAction(
-            QIcon(":/plugins/freehandrastergeoreferencer/icon2Points.png"),
+            self._icon("icon2Points.png"),
             "Georeference raster with 2 points",
             self.iface.mainWindow(),
         )
@@ -111,10 +116,39 @@ class FreehandRasterGeoreferencer(object):
         self.actionGeoref2PRaster.triggered.connect(self.georef2PRaster)
         self.actionGeoref2PRaster.setCheckable(True)
 
+        self.actionGeorefNPRaster = QAction(
+            self._icon("iconNPoints.png"),
+            "Georeference raster with N points\n"
+            "Drag raster features to their real location. "
+            "Right click: remove / save / load points.",
+            self.iface.mainWindow(),
+        )
+        self.actionGeorefNPRaster.setObjectName(
+            "FreehandRasterGeoreferencingLayerPlugin_GeorefNPRaster"
+        )
+        self.actionGeorefNPRaster.triggered.connect(self.georefNPRaster)
+        self.actionGeorefNPRaster.setCheckable(True)
+
+        self.actionSaveTiePoints = QAction(
+            "Save tie points...",
+            self.iface.mainWindow(),
+        )
+        self.actionSaveTiePoints.setObjectName(
+            "FreehandRasterGeoreferencingLayerPlugin_SaveTiePoints"
+        )
+        self.actionSaveTiePoints.triggered.connect(self.saveTiePoints)
+
+        self.actionLoadTiePoints = QAction(
+            "Load tie points...",
+            self.iface.mainWindow(),
+        )
+        self.actionLoadTiePoints.setObjectName(
+            "FreehandRasterGeoreferencingLayerPlugin_LoadTiePoints"
+        )
+        self.actionLoadTiePoints.triggered.connect(self.loadTiePoints)
+
         self.actionIncreaseTransparency = QAction(
-            QIcon(
-                ":/plugins/freehandrastergeoreferencer/" "iconTransparencyIncrease.png"
-            ),
+            self._icon("iconTransparencyIncrease.png"),
             "Increase transparency",
             self.iface.mainWindow(),
         )
@@ -122,9 +156,7 @@ class FreehandRasterGeoreferencer(object):
         self.actionIncreaseTransparency.setShortcut("Alt+Ctrl+N")
 
         self.actionDecreaseTransparency = QAction(
-            QIcon(
-                ":/plugins/freehandrastergeoreferencer/" "iconTransparencyDecrease.png"
-            ),
+            self._icon("iconTransparencyDecrease.png"),
             "Decrease transparency",
             self.iface.mainWindow(),
         )
@@ -132,14 +164,14 @@ class FreehandRasterGeoreferencer(object):
         self.actionDecreaseTransparency.setShortcut("Alt+Ctrl+B")
 
         self.actionExport = QAction(
-            QIcon(":/plugins/freehandrastergeoreferencer/iconExport.png"),
+            self._icon("iconExport.png"),
             "Export raster with world file",
             self.iface.mainWindow(),
         )
         self.actionExport.triggered.connect(self.exportGeorefRaster)
 
         self.actionUndo = QAction(
-            QIcon(":/plugins/freehandrastergeoreferencer/iconUndo.png"),
+            self._icon("iconUndo.png"),
             u"Undo",
             self.iface.mainWindow(),
         )
@@ -150,6 +182,12 @@ class FreehandRasterGeoreferencer(object):
         self.iface.insertAddLayerAction(self.actionAddLayer)
         self.iface.addPluginToRasterMenu(
             FreehandRasterGeoreferencer.PLUGIN_MENU, self.actionAddLayer
+        )
+        self.iface.addPluginToRasterMenu(
+            FreehandRasterGeoreferencer.PLUGIN_MENU, self.actionSaveTiePoints
+        )
+        self.iface.addPluginToRasterMenu(
+            FreehandRasterGeoreferencer.PLUGIN_MENU, self.actionLoadTiePoints
         )
 
         self.spinBoxRotate = QDoubleSpinBox(self.iface.mainWindow())
@@ -165,6 +203,36 @@ class FreehandRasterGeoreferencer(object):
         self.spinBoxRotate.setFocusPolicy(Qt.ClickFocus)
         self.spinBoxRotate.focusInEvent = self.spinBoxRotateFocusInEvent
 
+        # numeric control widgets (exact input of move / scale)
+        self.spinBoxCenterX = self._createParamSpinBox(-1e12, 1e12, 6, 1.0)
+        self.spinBoxCenterY = self._createParamSpinBox(-1e12, 1e12, 6, 1.0)
+        self.spinBoxPxX = self._createParamSpinBox(1e-9, 1e9, 6, 0.001)
+        self.spinBoxPxY = self._createParamSpinBox(1e-9, 1e9, 6, 0.001)
+
+        self.spinBoxCenterX.setToolTip("X coordinate of the raster center (map units)")
+        self.spinBoxCenterY.setToolTip("Y coordinate of the raster center (map units)")
+        self.spinBoxPxX.setToolTip(
+            "Pixel size in X: map units per pixel of the raster (xScale)"
+        )
+        self.spinBoxPxY.setToolTip(
+            "Pixel size in Y: map units per pixel of the raster (yScale)"
+        )
+
+        self.spinBoxCenterX.valueChanged.connect(self.onCenterEdited)
+        self.spinBoxCenterY.valueChanged.connect(self.onCenterEdited)
+        self.spinBoxPxX.valueChanged.connect(self.onPixelSizeEdited)
+        self.spinBoxPxY.valueChanged.connect(self.onPixelSizeEdited)
+
+        self.labelCenterX = QLabel("X:", self.iface.mainWindow())
+        self.labelCenterY = QLabel("Y:", self.iface.mainWindow())
+        self.labelPxX = QLabel("Px X:", self.iface.mainWindow())
+        self.labelPxY = QLabel("Px Y:", self.iface.mainWindow())
+        self.labelRms = QLabel("", self.iface.mainWindow())
+        self.labelRms.setToolTip(
+            "Root mean square residual of the tie points, in map units "
+            "(shown when 2 or more tie points are set)"
+        )
+
         # create toolbar for this plugin
         self.toolbar = self.iface.addToolBar("Freehand raster georeferencing")
         self.toolbar.addAction(self.actionAddLayer)
@@ -174,10 +242,20 @@ class FreehandRasterGeoreferencer(object):
         self.toolbar.addAction(self.actionScaleRaster)
         self.toolbar.addAction(self.actionAdjustRaster)
         self.toolbar.addAction(self.actionGeoref2PRaster)
+        self.toolbar.addAction(self.actionGeorefNPRaster)
+        self.toolbar.addWidget(self.labelCenterX)
+        self.toolbar.addWidget(self.spinBoxCenterX)
+        self.toolbar.addWidget(self.labelCenterY)
+        self.toolbar.addWidget(self.spinBoxCenterY)
+        self.toolbar.addWidget(self.labelPxX)
+        self.toolbar.addWidget(self.spinBoxPxX)
+        self.toolbar.addWidget(self.labelPxY)
+        self.toolbar.addWidget(self.spinBoxPxY)
         self.toolbar.addAction(self.actionDecreaseTransparency)
         self.toolbar.addAction(self.actionIncreaseTransparency)
         self.toolbar.addAction(self.actionExport)
         self.toolbar.addAction(self.actionUndo)
+        self.toolbar.addWidget(self.labelRms)
 
         # Register plugin layer type
         self.layerType = FreehandRasterGeoreferencerLayerType(self)
@@ -196,6 +274,8 @@ class FreehandRasterGeoreferencer(object):
         self.adjustTool.setAction(self.actionAdjustRaster)
         self.georef2PTool = GeorefRasterBy2PointsMapTool(self.iface)
         self.georef2PTool.setAction(self.actionGeoref2PRaster)
+        self.georefNPTool = GeorefRasterByNPointsMapTool(self.iface, self)
+        self.georefNPTool.setAction(self.actionGeorefNPRaster)
         self.currentTool = None
 
         # default state for toolbar
@@ -214,6 +294,12 @@ class FreehandRasterGeoreferencer(object):
             FreehandRasterGeoreferencerLayer.LAYER_TYPE
         )
 
+        self.iface.removePluginRasterMenu(
+            FreehandRasterGeoreferencer.PLUGIN_MENU, self.actionSaveTiePoints
+        )
+        self.iface.removePluginRasterMenu(
+            FreehandRasterGeoreferencer.PLUGIN_MENU, self.actionLoadTiePoints
+        )
         QgsProject.instance().layerRemoved.disconnect(self.layerRemoved)
         self.iface.currentLayerChanged.disconnect(self.currentLayerChanged)
 
@@ -239,18 +325,24 @@ class FreehandRasterGeoreferencer(object):
             self.actionScaleRaster.setEnabled(True)
             self.actionAdjustRaster.setEnabled(True)
             self.actionGeoref2PRaster.setEnabled(True)
+            self.actionGeorefNPRaster.setEnabled(True)
             self.actionDecreaseTransparency.setEnabled(True)
             self.actionIncreaseTransparency.setEnabled(True)
             self.actionExport.setEnabled(True)
+            self.actionSaveTiePoints.setEnabled(True)
+            self.actionLoadTiePoints.setEnabled(True)
             self.spinBoxRotate.setEnabled(True)
-            self.spinBoxRotateValueSetValue(layer.rotation)
+            self.spinBoxCenterX.setEnabled(True)
+            self.spinBoxCenterY.setEnabled(True)
+            self.spinBoxPxX.setEnabled(True)
+            self.spinBoxPxY.setEnabled(True)
             try:
                 # self.layer is the previously selected layer
-                # in case it was a FRGR layer, disconnect the spinBox
+                # in case it was a FRGR layer, disconnect the widgets
                 self.layer.transformParametersChanged.disconnect()
             except Exception:
                 pass
-            layer.transformParametersChanged.connect(self.spinBoxRotateUpdate)
+            layer.transformParametersChanged.connect(self.updateTransformWidgets)
             self.dialogAddLayer.toolButtonAdvanced.setEnabled(True)
             self.actionUndo.setEnabled(True)
             self.layer = layer
@@ -258,17 +350,27 @@ class FreehandRasterGeoreferencer(object):
             if self.currentTool:
                 self.currentTool.reset()
                 self.currentTool.setLayer(layer)
+                if hasattr(self.currentTool, "refreshPoints"):
+                    self.currentTool.refreshPoints()
+            self.updateTransformWidgets()
         else:
             self.actionMoveRaster.setEnabled(False)
             self.actionRotateRaster.setEnabled(False)
             self.actionScaleRaster.setEnabled(False)
             self.actionAdjustRaster.setEnabled(False)
             self.actionGeoref2PRaster.setEnabled(False)
+            self.actionGeorefNPRaster.setEnabled(False)
             self.actionDecreaseTransparency.setEnabled(False)
             self.actionIncreaseTransparency.setEnabled(False)
             self.actionExport.setEnabled(False)
+            self.actionSaveTiePoints.setEnabled(False)
+            self.actionLoadTiePoints.setEnabled(False)
             self.spinBoxRotate.setEnabled(False)
-            self.spinBoxRotateValueSetValue(0)
+            self.spinBoxCenterX.setEnabled(False)
+            self.spinBoxCenterY.setEnabled(False)
+            self.spinBoxPxX.setEnabled(False)
+            self.spinBoxPxY.setEnabled(False)
+            self._setTransformWidgets(0, 0, 0.0, 1.0, 1.0, None)
             try:
                 self.layer.transformParametersChanged.disconnect()
             except Exception:
@@ -324,6 +426,8 @@ class FreehandRasterGeoreferencer(object):
             self.currentTool = tool
             layer = self.iface.activeLayer()
             tool.setLayer(layer)
+            if hasattr(tool, "refreshPoints"):
+                tool.refreshPoints()
             self.iface.mapCanvas().setMapTool(tool)
 
     def _uncheckCurrentTool(self):
@@ -347,6 +451,9 @@ class FreehandRasterGeoreferencer(object):
 
     def georef2PRaster(self):
         self._toggleTool(self.georef2PTool)
+
+    def georefNPRaster(self):
+        self._toggleTool(self.georefNPTool)
 
     def increaseTransparency(self):
         layer = self.iface.activeLayer()
@@ -372,25 +479,192 @@ class FreehandRasterGeoreferencer(object):
                 self.dialogExportGeorefRaster.imagePath,
                 self.dialogExportGeorefRaster.isPutRotationInWorldFile,
                 self.dialogExportGeorefRaster.isExportOnlyWorldFile,
+                isExportCOG=self.dialogExportGeorefRaster.isExportCOG,
+                resamplingMethod=self.dialogExportGeorefRaster.resamplingMethod,
             )
 
-    def spinBoxRotateUpdate(self, newParameters):
-        self.spinBoxRotateValueSetValue(self.layer.rotation)
+    # ------------------------------------------------------------------
+    # Numeric control widgets (exact input of move / scale / rotation)
+    # ------------------------------------------------------------------
 
-    def spinBoxRotateValueChangeEvent(self, val):
-        layer = self.layer
-        layer.history.append(
-            {"action": "rotation", "rotation": layer.rotation, "center": layer.center}
+    def _createParamSpinBox(self, minimum, maximum, decimals, step):
+        sb = QDoubleSpinBox(self.iface.mainWindow())
+        sb.setDecimals(decimals)
+        sb.setMinimum(minimum)
+        sb.setMaximum(maximum)
+        sb.setSingleStep(step)
+        sb.setKeyboardTracking(False)
+        sb.setFocusPolicy(Qt.ClickFocus)
+        return sb
+
+    def _setTransformWidgets(self, cx, cy, rotation, xScale, yScale, rms):
+        self._syncing = True
+        try:
+            self.spinBoxRotate.setValue(rotation)
+            self.spinBoxCenterX.setValue(cx)
+            self.spinBoxCenterY.setValue(cy)
+            self.spinBoxPxX.setValue(xScale)
+            self.spinBoxPxY.setValue(yScale)
+            if rms is None:
+                self.labelRms.setText("")
+            else:
+                self.labelRms.setText("RMS: %.3f" % rms)
+        finally:
+            self._syncing = False
+
+    def updateTransformWidgets(self, newParameters=None):
+        """
+        Sync the toolbar widgets with the active layer transform
+        (called when the transform parameters changed).
+        """
+        layer = getattr(self, "layer", None)
+        if not layer or getattr(layer, "image", None) is None:
+            return
+        rms = None
+        if len(layer.tiePoints) >= 2:
+            _, rms = layer.tiePointResiduals()
+        self._setTransformWidgets(
+            layer.center.x(),
+            layer.center.y(),
+            layer.rotation,
+            layer.xScale,
+            layer.yScale,
+            rms,
         )
-        layer.setRotation(val)
+
+    def onCenterEdited(self):
+        if self._syncing:
+            return
+        layer = self.layer
+        if not layer or getattr(layer, "image", None) is None:
+            return
+        layer.history.append({"action": "move", "center": layer.center})
+        layer.setCenter(
+            QgsPointXY(self.spinBoxCenterX.value(), self.spinBoxCenterY.value())
+        )
         layer.repaint()
         layer.commitTransformParameters()
 
-    def spinBoxRotateValueSetValue(self, val):
-        # for changing only the spinbox value
-        self.spinBoxRotate.valueChanged.disconnect()
-        self.spinBoxRotate.setValue(val)
-        self.spinBoxRotate.valueChanged.connect(self.spinBoxRotateValueChangeEvent)
+    def onPixelSizeEdited(self):
+        if self._syncing:
+            return
+        layer = self.layer
+        if not layer or getattr(layer, "image", None) is None:
+            return
+        layer.history.append(
+            {
+                "action": "scale",
+                "xScale": layer.xScale,
+                "yScale": layer.yScale,
+            }
+        )
+        layer.setScale(self.spinBoxPxX.value(), self.spinBoxPxY.value())
+        layer.repaint()
+        layer.commitTransformParameters()
+
+    # ------------------------------------------------------------------
+    # Tie points save / load (QGIS georeferencer compatible .points CSV)
+    # ------------------------------------------------------------------
+
+    def _tiePointsDefaultPath(self, layer):
+        try:
+            return os.path.splitext(layer.getAbsoluteFilepath())[0] + ".points"
+        except Exception:
+            return ""
+
+    def saveTiePoints(self):
+        layer = self.iface.activeLayer()
+        if not isinstance(layer, FreehandRasterGeoreferencerLayer):
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self.iface.mainWindow(),
+            "Save tie points",
+            self._tiePointsDefaultPath(layer),
+            "Tie points (*.points)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".points"):
+            path += ".points"
+        try:
+            with open(path, "w") as writer:
+                writer.write(tiepoints.to_csv(layer.tiePoints))
+        except Exception as ex:
+            self.iface.messageBar().pushMessage(
+                "Freehand Raster Georeferencer",
+                "Unable to save tie points: %s" % ex,
+                level=3,
+                duration=5,
+            )
+            return
+        self.iface.messageBar().pushMessage(
+            "Freehand Raster Georeferencer",
+            "%d tie point(s) saved to %s" % (len(layer.tiePoints), path),
+            level=1,
+            duration=4,
+        )
+
+    def loadTiePoints(self):
+        layer = self.iface.activeLayer()
+        if not isinstance(layer, FreehandRasterGeoreferencerLayer):
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self.iface.mainWindow(),
+            "Load tie points",
+            self._tiePointsDefaultPath(layer),
+            "Tie points (*.points *.csv *.txt)",
+        )
+        if not path:
+            return
+        try:
+            with open(path) as reader:
+                points = tiepoints.from_csv(reader.read())
+        except Exception as ex:
+            self.iface.messageBar().pushMessage(
+                "Freehand Raster Georeferencer",
+                "Unable to load tie points: %s" % ex,
+                level=3,
+                duration=5,
+            )
+            return
+        if not points:
+            self.iface.messageBar().pushMessage(
+                "Freehand Raster Georeferencer",
+                "No valid tie point found in %s" % path,
+                level=1,
+                duration=5,
+            )
+            return
+        layer.history.append(
+            {
+                "action": "npfit",
+                "center": layer.center,
+                "rotation": layer.rotation,
+                "xScale": layer.xScale,
+                "yScale": layer.yScale,
+            }
+        )
+        layer.setTiePoints(points)
+        fitted = layer.applyTiePointFit()
+        if self.currentTool and hasattr(self.currentTool, "refreshPoints"):
+            self.currentTool.refreshPoints()
+        if fitted:
+            _, rms = layer.tiePointResiduals()
+            self.iface.messageBar().pushMessage(
+                "Freehand Raster Georeferencer",
+                "%d tie point(s) loaded, RMS = %.3f map units"
+                % (len(points), rms),
+                level=1,
+                duration=5,
+            )
+        else:
+            self.iface.messageBar().pushMessage(
+                "Freehand Raster Georeferencer",
+                "%d tie point(s) loaded (2 points minimum needed to "
+                "georeference)" % len(points),
+                level=1,
+                duration=5,
+            )
 
     def spinBoxRotateFocusInEvent(self, event):
         # for clear 2point rubberband
@@ -422,6 +696,9 @@ class FreehandRasterGeoreferencer(object):
                 layer.setRotation(act["rotation"])
                 layer.setCenter(act["center"])
                 layer.setScale(act["xScale"], act["yScale"])
+            elif act["action"] == "npfit":
+                layer.setCenter(act["center"])
+                layer.setRotation(act["rotation"])
                 layer.setScale(act["xScale"], act["yScale"])
             layer.repaint()
             layer.commitTransformParameters()

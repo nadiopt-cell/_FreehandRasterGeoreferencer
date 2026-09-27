@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>458</width>
-    <height>119</height>
+    <width>470</width>
+    <height>190</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -96,6 +96,63 @@
    <property name="text">
     <string>Only export world file for chosen raster</string>
    </property>
+  </widget>
+  <widget class="QCheckBox" name="checkBoxExportCOG">
+   <property name="geometry">
+    <rect>
+     <x>10</x>
+     <y>90</y>
+     <width>441</width>
+     <height>17</height>
+    </rect>
+   </property>
+   <property name="toolTip">
+    <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Export a Cloud Optimized GeoTIFF built from the original raster file (any band count / data type is preserved) with the georeferencing of the layer.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+   </property>
+   <property name="text">
+    <string>Export as COG (Cloud Optimized GeoTIFF)</string>
+   </property>
+  </widget>
+  <widget class="QLabel" name="labelResampling">
+   <property name="geometry">
+    <rect>
+     <x>10</x>
+     <y>118</y>
+     <width>180</width>
+     <height>16</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string>Resampling (north-up COG):</string>
+   </property>
+  </widget>
+  <widget class="QComboBox" name="comboBoxResampling">
+   <property name="geometry">
+    <rect>
+     <x>195</x>
+     <y>114</y>
+     <width>160</width>
+     <height>24</height>
+    </rect>
+   </property>
+   <property name="toolTip">
+    <string>Resampling method used when the rotation is baked into pixels (north-up COG)</string>
+   </property>
+   <item>
+    <property name="text">
+     <string>Nearest neighbour</string>
+    </property>
+   </item>
+   <item>
+    <property name="text">
+     <string>Bilinear</string>
+    </property>
+   </item>
+   <item>
+    <property name="text">
+     <string>Cubic</string>
+    </property>
+   </item>
   </widget>
  </widget>
  <resources/>

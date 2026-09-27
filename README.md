@@ -14,13 +14,34 @@ Use the master branch:
 
 1. Download a ZIP of the repository or clone it using "git clone"
 2. The folder with the Python files should be directly under the directory with all the QGIS plugins (for example, ~/.qgis2/python/plugins/FreehandRasterGeoreferencer)
-3. Compile the assets and UI: 
+3. Compile the assets and UI (OPTIONAL since v0.9.0: the `ui_*.py` modules and the icons are provided, pyuic5/pyrcc5 are not needed anymore. Only run this if you modify the `.ui` files):  
     - On Windows, launch the OSGeo4W Shell. On Unix, launch a command line and make sure the PyQT tools (pyuic5 and pyrcc5) are on the PATH
     - Go to the plugin directory
     - Launch "build.bat" or "build.sh"
 4. The next time QGIS is opened, the plugin should be listed in the "Plugins" > "Manage and install plugin" dialog
 
 A legacy version for QGIS 2 is in the `qgis2` branch.
+
+# Features (v0.9.0)
+
+- **Interactive georeferencing**: move, rotate, scale, adjust sides, georeference with 2 points — all with immediate visual feedback.
+- **Exact numeric control** (v0.9.0): the toolbar shows spinboxes for the raster center (X/Y, map units), the pixel sizes (X/Y, map units per pixel) and the rotation. Values are updated both ways: edit them for an exact placement, or let the map tools update them.
+- **Georeference with N points** (v0.9.0): click on a feature of the raster, drag it to its real location and release; repeat for as many points as needed. With 2 points a similarity fit (rotation + uniform scale) is applied, with 3 points or more a least-squares anisotropic scaled-rotation fit. The root mean square (RMS) of the residuals is displayed in the toolbar and the residuals of each point are drawn on the canvas. Right click on the map gives access to remove last point / clear all points / save / load the points.
+- **Tie points persistence** (v0.9.0): the tie points are stored in the QGIS project (they survive save/load, including reprojection when the project CRS changes) and can be exported to / imported from `.points` CSV files compatible with the built-in QGIS Georeferencer (menu Raster > Freehand Raster Georeferencer > Save/Load tie points).
+- **COG export** (v0.9.0): the export dialog can produce a Cloud Optimized GeoTIFF directly, built from the ORIGINAL raster file through GDAL — any band count or data type (16-bit, multispectral...) is preserved, the "pixel transformation" limitations of the display path do not apply. Two modes:
+    - *north-up* (default): the rotation is baked into the pixels by warping on the 4 raster corners; the resampling method can be selected (nearest/bilinear/cubic); transparent borders are handled with an alpha band.
+    - *"Put rotation in world file"* checked: the pixels are left untouched and the rotation is stored in the geotransform (ModelTransformation). If the GDAL version refuses to write a rotated COG, a tiled GeoTIFF is written instead (a warning is displayed).
+- **Export** (world file / image): unchanged, with one fix: an existing `.aux.xml` next to the raster is not overwritten anymore (the CRS is simply not written into it).
+
+# Development
+
+The transformation math lives in `transform_math.py` and the tie points serialization in `tiepoints.py`; both are pure Python (numpy only, no QGIS/Qt imports) and are covered by headless unit tests:
+
+```
+python3 -m pytest tests/
+```
+
+The tests include GDAL integration tests of the COG export paths (they are skipped automatically if the GDAL python bindings are not available).
 
 # Documentation
 

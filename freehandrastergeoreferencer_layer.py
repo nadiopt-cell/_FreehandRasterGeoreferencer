@@ -40,7 +40,7 @@ from qgis.core import (
     QgsRectangle,
 )
 
-from . import gdal_utils, utils
+from . import gdal_utils, transform_math, tiepoints, utils
 from .loaderrordialog import LoadErrorDialog
 
 
@@ -65,6 +65,7 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         self.filepath = filepath
         self.screenExtent = screenExtent
         self.history = []
+        self.tiePoints = []
         # set custom properties
         self.setCustomProperty("title", title)
         self.setCustomProperty("filepath", self.filepath)
@@ -128,6 +129,18 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         newCenter = transform.transform(self.center)
         newExtent = transform.transform(self.extent())
 
+        # transform the tie points targets as well (source pixel coords
+        # are unaffected)
+        for point in self.tiePoints:
+            try:
+                newPt = transform.transform(QgsPointXY(point["mx"], point["my"]))
+                point["mx"] = newPt.x()
+                point["my"] = newPt.y()
+            except Exception:
+                pass
+        if self.tiePoints:
+            self.saveTiePointsToProject()
+
         # transform the parameters except rotation
         # TODO rotation could be better handled (maybe check rotation between
         # old and new extent)
@@ -178,6 +191,100 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
 
     def transformParameters(self):
         return (self.center, self.rotation, self.xScale, self.yScale)
+
+    # ------------------------------------------------------------------
+    # Coordinate conversions (pixel-center convention, like GDAL GCPs:
+    # the center of the first pixel is (0, 0))
+    # ------------------------------------------------------------------
+
+    def pixelToMap(self, px, py):
+        """Map coordinates of a (fractional) pixel center."""
+        x, y = transform_math.pixel_to_map(
+            px,
+            py,
+            self.center.x(),
+            self.center.y(),
+            self.rotation,
+            self.xScale,
+            self.yScale,
+            self.image.width(),
+            self.image.height(),
+        )
+        return QgsPointXY(x, y)
+
+    def mapToPixel(self, x, y):
+        """(Fractional) pixel coordinates of a map position."""
+        return transform_math.map_to_pixel(
+            x,
+            y,
+            self.center.x(),
+            self.center.y(),
+            self.rotation,
+            self.xScale,
+            self.yScale,
+            self.image.width(),
+            self.image.height(),
+        )
+
+    # ------------------------------------------------------------------
+    # Tie points (interactive georeferencing)
+    # Each point: {"px", "py"}: pixel coords of the source feature,
+    # "mx", "my": target map coords in the layer CRS
+    # ------------------------------------------------------------------
+
+    def setTiePoints(self, points):
+        """Replace the tie points and persist them in the project."""
+        clean = []
+        for p in points:
+            np = tiepoints.normalize_point(p)
+            if np is not None:
+                clean.append(np)
+        self.tiePoints = clean
+        self.saveTiePointsToProject()
+
+    def saveTiePointsToProject(self):
+        self.setCustomProperty("tiePoints", tiepoints.to_json(self.tiePoints))
+        QgsProject.instance().setDirty(True)
+
+    def tiePointResiduals(self):
+        """(list of (dx, dy) residuals, rms) in map units for current params."""
+        return transform_math.residuals(
+            [
+                (p["px"], p["py"], p["mx"], p["my"])
+                for p in self.tiePoints
+            ],
+            {
+                "cx": self.center.x(),
+                "cy": self.center.y(),
+                "rotation": self.rotation,
+                "xScale": self.xScale,
+                "yScale": self.yScale,
+            },
+            self.image.width(),
+            self.image.height(),
+        )
+
+    def applyTiePointFit(self):
+        """
+        Fit the transform parameters from the stored tie points and apply
+        them. Returns True if a fit was applied.
+        """
+        fit = transform_math.fit_points(
+            [
+                (p["px"], p["py"], p["mx"], p["my"])
+                for p in self.tiePoints
+            ],
+            self.image.width(),
+            self.image.height(),
+        )
+        if fit is None:
+            return False
+        self.setCenter(QgsPointXY(fit["cx"], fit["cy"]))
+        self.setRotation(fit["rotation"])
+        self.setScale(fit["xScale"], fit["yScale"])
+        self.repaint()
+        self.commitTransformParameters()
+        return True
 
     def initializeLayer(self, screenExtent=None):
         if self.error or self.initialized or self.initializing:
@@ -311,15 +418,12 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
 
     def initializeExistingGeoreferencing(self, dataset, georef):
         # georef can have scaling, rotation or translation
-        rotation = 180 / math.pi * -math.atan2(georef[4], georef[1])
-        sx = math.sqrt(georef[1] ** 2 + georef[4] ** 2)
-        sy = math.sqrt(georef[2] ** 2 + georef[5] ** 2)
-        i_center_x = self.image.width() / 2
-        i_center_y = self.image.height() / 2
-        center = QgsPointXY(
-            georef[0] + georef[1] * i_center_x + georef[2] * i_center_y,
-            georef[3] + georef[4] * i_center_x + georef[5] * i_center_y,
+        width = self.image.width()
+        height = self.image.height()
+        cx, cy, rotation, sx, sy = transform_math.params_from_geotransform(
+            georef, width, height
         )
+        center = QgsPointXY(cx, cy)
 
         qDebug(repr(rotation) + " " + repr((sx, sy)) + " " + repr(center))
 
@@ -427,6 +531,7 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         layer.rotation = self.rotation
         layer.xScale = self.xScale
         layer.yScale = self.yScale
+        layer.tiePoints = [dict(p) for p in self.tiePoints]
         layer.commitTransformParameters()
         return layer
 
@@ -467,37 +572,16 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         )
 
     def transformedCornerCoordinates(self, center, rotation, xScale, yScale):
-        # scale
-        topLeft = QgsPointXY(
-            -self.image.width() / 2.0 * xScale, self.image.height() / 2.0 * yScale
+        corners = transform_math.corners(
+            center.x(),
+            center.y(),
+            rotation,
+            xScale,
+            yScale,
+            self.image.width(),
+            self.image.height(),
         )
-        topRight = QgsPointXY(
-            self.image.width() / 2.0 * xScale, self.image.height() / 2.0 * yScale
-        )
-        bottomLeft = QgsPointXY(
-            -self.image.width() / 2.0 * xScale, -self.image.height() / 2.0 * yScale
-        )
-        bottomRight = QgsPointXY(
-            self.image.width() / 2.0 * xScale, -self.image.height() / 2.0 * yScale
-        )
-
-        # rotate
-        # minus sign because rotation is CW in this class and Qt)
-        rotationRad = -rotation * math.pi / 180
-        cosRot = math.cos(rotationRad)
-        sinRot = math.sin(rotationRad)
-
-        topLeft = self._rotate(topLeft, cosRot, sinRot)
-        topRight = self._rotate(topRight, cosRot, sinRot)
-        bottomRight = self._rotate(bottomRight, cosRot, sinRot)
-        bottomLeft = self._rotate(bottomLeft, cosRot, sinRot)
-
-        topLeft.set(topLeft.x() + center.x(), topLeft.y() + center.y())
-        topRight.set(topRight.x() + center.x(), topRight.y() + center.y())
-        bottomRight.set(bottomRight.x() + center.x(), bottomRight.y() + center.y())
-        bottomLeft.set(bottomLeft.x() + center.x(), bottomLeft.y() + center.y())
-
-        return (topLeft, topRight, bottomRight, bottomLeft)
+        return tuple(QgsPointXY(x, y) for x, y in corners)
 
     def transformedCornerCoordinatesFromPoint(
         self, startPoint, rotation, xScale, yScale
@@ -640,6 +724,7 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         xCenter = float(self.customProperty("xCenter", 0.0))
         yCenter = float(self.customProperty("yCenter", 0.0))
         self.center = QgsPointXY(xCenter, yCenter)
+        self.tiePoints = tiepoints.from_json(self.customProperty("tiePoints", "[]"))
         self.setTransparency(
             int(self.customProperty("transparency", LayerDefaultSettings.TRANSPARENCY))
         )

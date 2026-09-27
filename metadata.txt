@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.8.3
+version = 0.9.0
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,23 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.0
+        * Export directly to Cloud Optimized GeoTIFF (COG), built from the
+          original raster through GDAL (any band count / data type is
+          preserved). Two modes: north-up (rotation baked into the pixels,
+          resampling selectable) or rotation kept in the geotransform
+          (ModelTransformation, with automatic tiled-GeoTIFF fallback)
+        * Exact numeric control in the toolbar for the raster center (X/Y)
+          and pixel sizes (X/Y), in addition to the rotation spinbox
+        * New interactive georeferencing tool with an unlimited number of
+          tie points (2 points: similarity fit; 3+ points: least-squares
+          anisotropic scaled-rotation fit) with live RMS residuals display
+        * Tie points are saved in the QGIS project and can be exported /
+          imported as .points files (QGIS Georeferencer compatible CSV)
+        * The .aux.xml CRS file is not overwritten anymore if it already
+          exists
+        * Icons are loaded from files: pyrcc5 is not needed anymore, the
+          ui_*.py modules are provided prebuilt (pyuic5 optional)
     0.8.3
         * Disable pixel transformation for formats other than TIFF
     0.8.0
@@ -52,4 +69,4 @@ changelog =
         * Added option for Rotate tool to rotate around point, using Ctrl modifier (contributed by Sebastien Barre)
         * Changed the location of "Freehand Raster Georeferencer" menu, now under the Raster menu
     0.2.0 
-	    * First public release for QGIS 2
+            * First public release for QGIS 2
