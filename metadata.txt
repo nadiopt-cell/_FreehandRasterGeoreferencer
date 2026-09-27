@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.9.3
+version = 0.9.4
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,19 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.4
+        * FIX: the N-points tool now follows the classic georeferencer
+          two-click workflow: click a point on the raster, then click its
+          correct location on the map - the pair appears in the points
+          table and the raster immediately moves to its newly computed
+          position, then the tool is ready for the next pair. A plain
+          click no longer adds a degenerate point on its own (the former
+          behavior that filled the table with useless points)
+        * The drag gesture (press on the raster, move, release) still
+          creates a pair in a single action
+        * Esc cancels the current two-click sequence, clicks outside the
+          raster are rejected with a message, and a status message with
+          the point count / RMS is shown after every pair
     0.9.3
         * New tie points table dock (like the GCP table of the built-in
           QGIS georeferencer): each point can be enabled / disabled
