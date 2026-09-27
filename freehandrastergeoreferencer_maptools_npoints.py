@@ -206,6 +206,10 @@ class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
 
         pairs = []
         for point in self.layer.tiePoints:
+            if not point.get("en", True):
+                # disabled point: excluded from the fit, markers are not
+                # drawn on the canvas (it stays visible in the points table)
+                continue
             predicted = self.layer.pixelToMap(point["px"], point["py"])
             target = QgsPointXY(point["mx"], point["my"])
             pairs.append((predicted, target))

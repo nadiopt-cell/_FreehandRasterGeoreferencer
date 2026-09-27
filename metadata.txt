@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.9.2
+version = 0.9.3
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,17 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.3
+        * New tie points table dock (like the GCP table of the built-in
+          QGIS georeferencer): each point can be enabled / disabled
+          (excluded from the fit) or deleted, with live residuals
+          (dX, dY, residual). It opens automatically with the N-points
+          tool and can be toggled from the toolbar / Raster menu
+        * The raster is refitted and redrawn immediately after any change
+          of the points (canvas drag, table toggle / delete / clear)
+        * .points files now follow the exact QGIS georeferencer format
+          (mapX,mapY,pixelX,pixelY,enable,dX,dY,residual); the legacy
+          pixel-first format is still read
     0.9.2
         * FIX: TypeError from FreehandRasterGeoreferencerLayer.metadata()
           (upstream override returned a str, which is the QGIS 2 API;

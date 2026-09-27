@@ -243,6 +243,23 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         self.tiePoints = clean
         self.saveTiePointsToProject()
 
+    def enabledTiePoints(self):
+        """Tie points used for the fit (disabled points are excluded)."""
+        return [p for p in self.tiePoints if p.get("en", True)]
+
+    def setTiePointEnabled(self, index, enabled):
+        """Enable / disable a tie point and persist (like the QGIS
+        georeferencer checkbox). Disabled points are not refitted."""
+        if 0 <= index < len(self.tiePoints):
+            self.tiePoints[index]["en"] = bool(enabled)
+            self.saveTiePointsToProject()
+
+    def removeTiePoint(self, index):
+        """Remove one tie point and persist."""
+        if 0 <= index < len(self.tiePoints):
+            del self.tiePoints[index]
+            self.saveTiePointsToProject()
+
     def saveTiePointsToProject(self):
         self.setCustomProperty("tiePoints", tiepoints.to_json(self.tiePoints))
         QgsProject.instance().setDirty(True)
@@ -267,13 +284,13 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
 
     def applyTiePointFit(self):
         """
-        Fit the transform parameters from the stored tie points and apply
-        them. Returns True if a fit was applied.
+        Fit the transform parameters from the enabled tie points and apply
+        them. Returns True if a fit was applied (2 enabled points minimum).
         """
         fit = transform_math.fit_points(
             [
                 (p["px"], p["py"], p["mx"], p["my"])
-                for p in self.tiePoints
+                for p in self.enabledTiePoints()
             ],
             self.image.width(),
             self.image.height(),

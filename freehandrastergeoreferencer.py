@@ -31,6 +31,7 @@ from .freehandrastergeoreferencer_maptools import (
 )
 from .freehandrastergeoreferencer_maptools_npoints import GeorefRasterByNPointsMapTool
 from .freehandrastergeoreferencerdialog import FreehandRasterGeoreferencerDialog
+from .georefpointsdockwidget import GeorefPointsDockWidget, RIGHT_DOCK_AREA
 
 
 class FreehandRasterGeoreferencer(object):
@@ -147,6 +148,18 @@ class FreehandRasterGeoreferencer(object):
         )
         self.actionLoadTiePoints.triggered.connect(self.loadTiePoints)
 
+        self.actionShowPointsDock = QAction(
+            self._icon("iconPointsTable.png"),
+            "Tie points table\nShow or hide the table of tie points "
+            "(enable / disable / remove points, live residuals).",
+            self.iface.mainWindow(),
+        )
+        self.actionShowPointsDock.setObjectName(
+            "FreehandRasterGeoreferencingLayerPlugin_ShowPointsDock"
+        )
+        self.actionShowPointsDock.setCheckable(True)
+        self.actionShowPointsDock.triggered.connect(self.showPointsDock)
+
         self.actionIncreaseTransparency = QAction(
             self._icon("iconTransparencyIncrease.png"),
             "Increase transparency",
@@ -188,6 +201,9 @@ class FreehandRasterGeoreferencer(object):
         )
         self.iface.addPluginToRasterMenu(
             FreehandRasterGeoreferencer.PLUGIN_MENU, self.actionLoadTiePoints
+        )
+        self.iface.addPluginToRasterMenu(
+            FreehandRasterGeoreferencer.PLUGIN_MENU, self.actionShowPointsDock
         )
 
         self.spinBoxRotate = QDoubleSpinBox(self.iface.mainWindow())
@@ -243,6 +259,7 @@ class FreehandRasterGeoreferencer(object):
         self.toolbar.addAction(self.actionAdjustRaster)
         self.toolbar.addAction(self.actionGeoref2PRaster)
         self.toolbar.addAction(self.actionGeorefNPRaster)
+        self.toolbar.addAction(self.actionShowPointsDock)
         self.toolbar.addWidget(self.labelCenterX)
         self.toolbar.addWidget(self.spinBoxCenterX)
         self.toolbar.addWidget(self.labelCenterY)
@@ -278,10 +295,25 @@ class FreehandRasterGeoreferencer(object):
         self.georefNPTool.setAction(self.actionGeorefNPRaster)
         self.currentTool = None
 
+        # tie points table dock (QGIS georeferencer style GCP table)
+        self.dockPoints = GeorefPointsDockWidget(self.iface.mainWindow())
+        self.iface.addDockWidget(RIGHT_DOCK_AREA, self.dockPoints)
+        self.dockPoints.hide()
+        self.dockPoints.visibilityChanged.connect(self._pointsDockVisibilityChanged)
+        self.dockPoints.pointToggled.connect(self.dockPointToggled)
+        self.dockPoints.pointsDeleted.connect(self.dockPointsDeleted)
+        self.dockPoints.pointsCleared.connect(self.dockPointsCleared)
+
         # default state for toolbar
         self.checkCurrentLayerIsPluginLayer()
 
     def unload(self):
+        # Remove the tie points dock
+        if getattr(self, "dockPoints", None) is not None:
+            self.iface.mainWindow().removeDockWidget(self.dockPoints)
+            self.dockPoints.deleteLater()
+            self.dockPoints = None
+
         # Remove the plugin menu item and icon
         self.iface.layerToolBar().removeAction(self.actionAddLayer)
         self.iface.removeAddLayerAction(self.actionAddLayer)
@@ -299,6 +331,9 @@ class FreehandRasterGeoreferencer(object):
         )
         self.iface.removePluginRasterMenu(
             FreehandRasterGeoreferencer.PLUGIN_MENU, self.actionLoadTiePoints
+        )
+        self.iface.removePluginRasterMenu(
+            FreehandRasterGeoreferencer.PLUGIN_MENU, self.actionShowPointsDock
         )
         QgsProject.instance().layerRemoved.disconnect(self.layerRemoved)
         self.iface.currentLayerChanged.disconnect(self.currentLayerChanged)
@@ -331,6 +366,7 @@ class FreehandRasterGeoreferencer(object):
             self.actionExport.setEnabled(True)
             self.actionSaveTiePoints.setEnabled(True)
             self.actionLoadTiePoints.setEnabled(True)
+            self.actionShowPointsDock.setEnabled(True)
             self.spinBoxRotate.setEnabled(True)
             self.spinBoxCenterX.setEnabled(True)
             self.spinBoxCenterY.setEnabled(True)
@@ -365,12 +401,15 @@ class FreehandRasterGeoreferencer(object):
             self.actionExport.setEnabled(False)
             self.actionSaveTiePoints.setEnabled(False)
             self.actionLoadTiePoints.setEnabled(False)
+            self.actionShowPointsDock.setEnabled(False)
             self.spinBoxRotate.setEnabled(False)
             self.spinBoxCenterX.setEnabled(False)
             self.spinBoxCenterY.setEnabled(False)
             self.spinBoxPxX.setEnabled(False)
             self.spinBoxPxY.setEnabled(False)
             self._setTransformWidgets(0, 0, 0.0, 1.0, 1.0, None)
+            if getattr(self, "dockPoints", None) is not None:
+                self.dockPoints.updatePanel(None)
             try:
                 self.layer.transformParametersChanged.disconnect()
             except Exception:
@@ -454,6 +493,72 @@ class FreehandRasterGeoreferencer(object):
 
     def georefNPRaster(self):
         self._toggleTool(self.georefNPTool)
+        if self.actionGeorefNPRaster.isChecked():
+            # show the points table together with the N-points tool
+            if not self.dockPoints.isVisible():
+                self.dockPoints.show()
+            self.updateTransformWidgets()
+
+    def showPointsDock(self):
+        self.dockPoints.setVisible(self.actionShowPointsDock.isChecked())
+        if self.actionShowPointsDock.isChecked():
+            self.updateTransformWidgets()
+
+    def _pointsDockVisibilityChanged(self, visible):
+        # keep the toolbar action in sync when the user closes the dock
+        if self.actionShowPointsDock.isChecked() != visible:
+            wasBlocked = self.actionShowPointsDock.blockSignals(True)
+            self.actionShowPointsDock.setChecked(visible)
+            self.actionShowPointsDock.blockSignals(wasBlocked)
+
+    def _refitAfterPointsEdit(self, layer):
+        """Refit the transform from the tie points after a table edit and
+        redraw everything (undo entry is pushed only if the fit changed
+        the transform)."""
+        params = (layer.center, layer.rotation, layer.xScale, layer.yScale)
+        if layer.applyTiePointFit():
+            layer.history.append(
+                {
+                    "action": "npfit",
+                    "center": params[0],
+                    "rotation": params[1],
+                    "xScale": params[2],
+                    "yScale": params[3],
+                }
+            )
+        if isinstance(self.currentTool, GeorefRasterByNPointsMapTool):
+            self.currentTool.refreshPoints()
+        self.updateTransformWidgets()
+
+    def dockPointToggled(self, row, enabled):
+        layer = getattr(self, "layer", None)
+        if not isinstance(layer, FreehandRasterGeoreferencerLayer):
+            return
+        if not (0 <= row < len(layer.tiePoints)):
+            return
+        layer.setTiePointEnabled(row, enabled)
+        self._refitAfterPointsEdit(layer)
+
+    def dockPointsDeleted(self, rows):
+        layer = getattr(self, "layer", None)
+        if not isinstance(layer, FreehandRasterGeoreferencerLayer):
+            return
+        deleted = False
+        for row in sorted(rows, reverse=True):
+            if 0 <= row < len(layer.tiePoints):
+                layer.removeTiePoint(row)
+                deleted = True
+        if deleted:
+            self._refitAfterPointsEdit(layer)
+
+    def dockPointsCleared(self):
+        layer = getattr(self, "layer", None)
+        if not isinstance(layer, FreehandRasterGeoreferencerLayer):
+            return
+        layer.setTiePoints([])
+        if isinstance(self.currentTool, GeorefRasterByNPointsMapTool):
+            self.currentTool.refreshPoints()
+        self.updateTransformWidgets()
 
     def increaseTransparency(self):
         layer = self.iface.activeLayer()
@@ -514,15 +619,20 @@ class FreehandRasterGeoreferencer(object):
 
     def updateTransformWidgets(self, newParameters=None):
         """
-        Sync the toolbar widgets with the active layer transform
-        (called when the transform parameters changed).
+        Sync the toolbar widgets and the tie points table with the active
+        layer transform (called when the transform parameters changed).
         """
         layer = getattr(self, "layer", None)
         if not layer or getattr(layer, "image", None) is None:
+            if getattr(self, "dockPoints", None) is not None:
+                self.dockPoints.updatePanel(None)
             return
+        residuals = []
         rms = None
-        if len(layer.tiePoints) >= 2:
-            _, rms = layer.tiePointResiduals()
+        if len(layer.tiePoints) >= 1:
+            residuals, rms = layer.tiePointResiduals()
+            if len(layer.tiePoints) < 2:
+                rms = None
         self._setTransformWidgets(
             layer.center.x(),
             layer.center.y(),
@@ -531,6 +641,8 @@ class FreehandRasterGeoreferencer(object):
             layer.yScale,
             rms,
         )
+        if getattr(self, "dockPoints", None) is not None:
+            self.dockPoints.updatePanel(layer, residuals)
 
     def onCenterEdited(self):
         if self._syncing:
@@ -600,8 +712,9 @@ class FreehandRasterGeoreferencer(object):
         if not path.lower().endswith(".points"):
             path += ".points"
         try:
+            residuals, _ = layer.tiePointResiduals()
             with open(path, "w") as writer:
-                writer.write(tiepoints.to_csv(layer.tiePoints))
+                writer.write(tiepoints.to_csv(layer.tiePoints, residuals))
         except Exception as ex:
             self.iface.messageBar().pushMessage(
                 "Freehand Raster Georeferencer",
@@ -678,6 +791,7 @@ class FreehandRasterGeoreferencer(object):
                 level=1,
                 duration=5,
             )
+        self.updateTransformWidgets()
 
     def spinBoxRotateFocusInEvent(self, event):
         # for clear 2point rubberband
