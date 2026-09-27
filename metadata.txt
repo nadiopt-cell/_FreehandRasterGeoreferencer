@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.9.1
+version = 0.9.2
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,12 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.2
+        * FIX: TypeError from FreehandRasterGeoreferencerLayer.metadata()
+          (upstream override returned a str, which is the QGIS 2 API;
+          QGIS 3 expects a QgsLayerMetadata object). Layer information
+          now appears in the standard metadata framework, the plugin
+          layer properties dialog keeps the textual summary
     0.9.1
         * FIX: plugin failed to load with AttributeError
           (spinBoxRotateValueChangeEvent handler was missing after the

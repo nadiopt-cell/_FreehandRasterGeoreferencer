@@ -25,7 +25,7 @@ class PropertiesDialog(QDialog, Ui_Dialog):
         self.horizontalSlider_Transparency.valueChanged.connect(self.sliderChanged)
         self.spinBox_Transparency.valueChanged.connect(self.spinBoxChanged)
 
-        self.textEdit_Properties.setText(layer.metadata())
+        self.textEdit_Properties.setText(layer.metadataText())
         self.spinBox_Transparency.setValue(layer.transparency)
 
     def sliderChanged(self, val):

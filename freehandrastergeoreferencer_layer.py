@@ -30,6 +30,7 @@ from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsDataProvider,
+    QgsLayerMetadata,
     QgsMapLayerRenderer,
     QgsMessageLog,
     QgsPluginLayer,
@@ -741,6 +742,25 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         return True
 
     def metadata(self):
+        """
+        QgsMapLayer.metadata() override — must return a QgsLayerMetadata
+        object (QGIS 3 API). The human-readable summary lives in
+        metadataText(); QGIS calls this method itself (layer properties /
+        information panel) through SIP, which enforces the return type.
+        """
+        metadata = QgsLayerMetadata()
+        name = self.title or self.name()
+        metadata.setIdentifier(name)
+        metadata.setTitle(name)
+        metadata.setType("dataset")
+        try:
+            metadata.setCrs(self.crs())
+        except Exception:
+            pass
+        metadata.setAbstract(self.metadataText())
+        return metadata
+
+    def metadataText(self):
         lines = []
         fmt = "%s:\t%s"
         lines.append(fmt % (self.tr("Title"), self.title))
