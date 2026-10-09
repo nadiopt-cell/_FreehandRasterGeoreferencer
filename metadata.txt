@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.9.11
+version = 0.9.12
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,19 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.12
+        * FIX: the plain GeoTIFF export (non-COG) of the polynomial warp
+          path failed with "PREDICTOR=STANDARD is not supported" - the
+          GTiff driver declares PREDICTOR as an int option and rejects
+          the string values; the numeric forms 2 / 3 are now used for
+          GTiff (the rotated-COG tiled fallback had the same problem).
+          With QGIS >= 3.34 (gdal.UseExceptions) the error aborted the
+          whole export
+        * NEW: the tie points are numbered on the map canvas next to
+          their target markers; the numbers match the row numbers of
+          the tie points table, disabled points keep their number drawn
+          in gray - so it is clear which point to remove / disable for
+          a more accurate fit
     0.9.11
         * Stability fixes against random QGIS crashes:
         * FIX: the QImage built in preCheckImage (non-Byte / multi-band

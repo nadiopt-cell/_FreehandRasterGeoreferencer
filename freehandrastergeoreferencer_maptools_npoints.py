@@ -39,6 +39,7 @@ from .freehandrastergeoreferencer_maptools import (
     setLayerVisible as _setLayerVisible,
 )
 from .rastershadowmapcanvasitem import RasterShadowMapCanvasItem
+from .tiepointlabelsmapcanvasitem import TiePointLabelsMapCanvasItem
 
 
 class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
@@ -66,6 +67,11 @@ class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
         self.rubberBandDrag = QgsRubberBand(self.canvas, self._lineGeometry())
         self.rubberBandDrag.setColor(Qt.yellow)
         self.rubberBandDrag.setWidth(1)
+
+        # point numbers next to the target markers (numbers match the row
+        # numbers of the tie points table); created last so that they are
+        # stacked on top of the markers
+        self.tiePointLabels = TiePointLabelsMapCanvasItem(self.canvas)
 
         self.isLayerVisible = True
 
@@ -102,6 +108,7 @@ class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
         self.rubberBandDrag.reset(self._lineGeometry())
         self.rubberBandResiduals.reset(self._lineGeometry())
         self.rubberBandTargets.reset(self._pointGeometry())
+        self.tiePointLabels.clear()
         self.rasterShadow.reset()
         self.layer = None
 
@@ -202,7 +209,17 @@ class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
         self.rubberBandResiduals.reset(self._lineGeometry())
 
         if self.layer is None:
+            self.tiePointLabels.clear()
             return
+
+        # the numbers must match the row numbers of the tie points table:
+        # row i (1-based) = tiePoints[i], disabled points keep their number
+        # but are drawn in gray
+        labels = [
+            (QgsPointXY(point["mx"], point["my"]), i + 1, bool(point.get("en", True)))
+            for i, point in enumerate(self.layer.tiePoints)
+        ]
+        self.tiePointLabels.setPoints(labels)
 
         pairs = []
         for point in self.layer.tiePoints:

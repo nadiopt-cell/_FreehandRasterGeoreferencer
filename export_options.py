@@ -24,6 +24,12 @@ headlessly. It centralizes:
 - horizontal predictor selection for the lossless codecs (DEFLATE / LZW
   / ZSTD): STANDARD (horizontal differencing) for integer types,
   FLOATING_POINT for float types, nothing for complex / exotic types.
+  The value spelling is driver-specific: the COG driver declares
+  PREDICTOR as a string-select with STANDARD / FLOATING_POINT, while
+  the GTiff driver declares it as an int (1/2/3) and REJECTS the string
+  forms ("PREDICTOR=STANDARD is not supported" - a hard error since
+  QGIS 3.34 enables gdal.UseExceptions()), so GTiff gets the numeric
+  values 2 / 3.
 """
 
 from osgeo import gdal
@@ -62,13 +68,20 @@ JPEG_QUALITY = 85
 WEBP_QUALITY = 80
 
 
-def predictorFor(dataType):
+def predictorFor(dataType, driverName="COG"):
     """TIFF predictor value for a lossless codec, or None when the data
-    type must not be combined with a predictor."""
+    type must not be combined with a predictor.
+
+    GTiff declares PREDICTOR as an int option (2 = horizontal
+    differencing, 3 = floating point) and rejects the string values;
+    the COG driver uses the string-select form. Any driver other than
+    GTiff gets the string form (numerical values are accepted by COG
+    too via aliases, but strings are the documented spelling there).
+    """
     if dataType in _INT_PREDICTOR_DTYPES:
-        return "STANDARD"
+        return "2" if driverName == "GTiff" else "STANDARD"
     if dataType in _FLOAT_PREDICTOR_DTYPES:
-        return "FLOATING_POINT"
+        return "3" if driverName == "GTiff" else "FLOATING_POINT"
     return None
 
 
@@ -130,7 +143,7 @@ def rasterCreationOptions(compression, dataType, bandCount, driverName="COG"):
     else:
         # DEFLATE / LZW / ZSTD: the horizontal predictor typically
         # reduces the size by 10-30% on continuous rasters
-        predictor = predictorFor(dataType)
+        predictor = predictorFor(dataType, driverName)
         if predictor is not None:
             options.append("PREDICTOR=" + predictor)
     return options, warning

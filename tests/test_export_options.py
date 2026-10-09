@@ -41,6 +41,15 @@ class TestPredictorFor:
         assert eo.predictorFor(gdal.GDT_CInt16) is None
         assert eo.predictorFor(gdal.GDT_CFloat32) is None
 
+    def test_gtiff_driver_gets_numeric_predictor(self):
+        # the GTiff driver declares PREDICTOR as an int option and
+        # REJECTS the string forms (hard error with UseExceptions)
+        for dt in (gdal.GDT_Byte, gdal.GDT_UInt16, gdal.GDT_Int32):
+            assert eo.predictorFor(dt, "GTiff") == "2"
+        for dt in (gdal.GDT_Float32, gdal.GDT_Float64):
+            assert eo.predictorFor(dt, "GTiff") == "3"
+        assert eo.predictorFor(gdal.GDT_CFloat32, "GTiff") is None
+
 
 class TestRasterCreationOptions:
     def test_deflate_byte_gets_standard_predictor(self):
@@ -56,7 +65,15 @@ class TestRasterCreationOptions:
             "DEFLATE", gdal.GDT_Float32, 1, "GTiff"
         )
         assert warning is None
-        assert "PREDICTOR=FLOATING_POINT" in options
+        assert "PREDICTOR=3" in options
+
+    def test_deflate_byte_gtiff_gets_numeric_predictor(self):
+        options, warning = eo.rasterCreationOptions(
+            "DEFLATE", gdal.GDT_Byte, 3, "GTiff"
+        )
+        assert warning is None
+        assert "COMPRESS=DEFLATE" in options
+        assert "PREDICTOR=2" in options
 
     def test_deflate_is_the_no_warning_default(self):
         options, warning = eo.rasterCreationOptions(
@@ -297,3 +314,76 @@ class TestCompressionIntegration:
             assert _image_compression(dest) == "WEBP"
         else:
             assert warning  # unsupported build: DEFLATE fallback
+
+    def test_gtiff_createcopy_with_built_options(self, tmp_path, src_path):
+        """Regression: the plain-GeoTIFF export used PREDICTOR=STANDARD,
+        which the GTiff driver rejects (int option) - with UseExceptions
+        (QGIS >= 3.34) that aborted every non-COG GDAL export."""
+        dest = str(tmp_path / "plain_gtiff.tif")
+        vrtPath = "/vsimem/test_expo_gtiff.vrt"
+        vrt = gdal.Translate(vrtPath, src_path)
+        try:
+            options, warning = eo.rasterCreationOptions(
+                "DEFLATE", vrt.GetRasterBand(1).DataType, vrt.RasterCount + 1,
+                "GTiff",
+            )
+            assert warning is None
+            gtiff = gdal.GetDriverByName("GTiff")
+            out = gtiff.CreateCopy(
+                dest,
+                vrt,
+                options=[
+                    "TILED=YES",
+                    "BLOCKXSIZE=512",
+                    "BLOCKYSIZE=512",
+                    "BIGTIFF=IF_SAFER",
+                ]
+                + options,
+            )
+            assert out is not None
+            out = None
+            assert _image_compression(dest) == "DEFLATE"
+        finally:
+            gdal.Unlink(vrtPath)
+
+    def test_gtiff_warp_with_built_options(self, tmp_path, src_path):
+        """Regression: replicate _exportPolyWarp's non-COG branch
+        (gdal.Warp with format=GTiff and the built options)."""
+        dest = str(tmp_path / "warp_gtiff.tif")
+        vrtPath = "/vsimem/test_expo_warp_gt.vrt"
+        vrt = gdal.Translate(vrtPath, src_path)
+        try:
+            gcps = [
+                gdal.GCP(500000.0, 4500000.0, 0.0, 0.5, 0.5),
+                gdal.GCP(501990.0, 4500000.0, 0.0, W - 0.5, 0.5),
+                gdal.GCP(501990.0, 4498510.0, 0.0, W - 0.5, H - 0.5),
+                gdal.GCP(500000.0, 4498510.0, 0.0, 0.5, H - 0.5),
+            ]
+            vrt.SetGCPs(gcps, PROJ4_UTM37N)
+            options, _ = eo.rasterCreationOptions(
+                "DEFLATE", vrt.GetRasterBand(1).DataType, vrt.RasterCount + 1,
+                "GTiff",
+            )
+            out = gdal.Warp(
+                dest,
+                vrt,
+                format="GTiff",
+                dstSRS=PROJ4_UTM37N,
+                resampleAlg="near",
+                dstAlpha=True,
+                outputBounds=(499990.0, 4498500.0, 502000.0, 4500010.0),
+                xRes=10.0,
+                yRes=10.0,
+                creationOptions=[
+                    "TILED=YES",
+                    "BLOCKXSIZE=512",
+                    "BLOCKYSIZE=512",
+                    "BIGTIFF=IF_SAFER",
+                ]
+                + options,
+            )
+            assert out is not None
+            out = None
+            assert _image_compression(dest) == "DEFLATE"
+        finally:
+            gdal.Unlink(vrtPath)
