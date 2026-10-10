@@ -19,7 +19,15 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QLabel,
 )
-from qgis.core import QgsApplication, QgsMapLayer, QgsPointXY, QgsProject
+from qgis.core import (
+    Qgis,
+    QgsApplication,
+    QgsCoordinateReferenceSystem,
+    QgsMapLayer,
+    QgsMessageLog,
+    QgsPointXY,
+    QgsProject,
+)
 
 from . import tiepoints, utils
 from .exportgeorefrasterdialog import ExportGeorefRasterDialog
@@ -525,12 +533,24 @@ class FreehandRasterGeoreferencer(object):
             self.actionUndo.setEnabled(True)
             self.layer = layer
 
-            if self.currentTool:
-                self.currentTool.reset()
-                self.currentTool.setLayer(layer)
-                if hasattr(self.currentTool, "refreshPoints"):
-                    self.currentTool.refreshPoints()
-            self.updateTransformWidgets()
+            try:
+                if self.currentTool:
+                    self.currentTool.reset()
+                    self.currentTool.setLayer(layer)
+                    if hasattr(self.currentTool, "refreshPoints"):
+                        self.currentTool.refreshPoints()
+                self.updateTransformWidgets()
+            except Exception as ex:
+                # a layer restored from a project initializes lazily (the
+                # image is loaded on the first draw): never let a
+                # transient state escape into the Qt signal handler -
+                # QGIS would show the Python error dialog right after a
+                # restart ("object has no attribute 'image'")
+                QgsMessageLog.logMessage(
+                    "Error while selecting the georeferenced raster: %r" % ex,
+                    "FreehandRasterGeoreferencer",
+                    Qgis.Warning,
+                )
         else:
             self.actionMoveRaster.setEnabled(False)
             self.actionRotateRaster.setEnabled(False)
@@ -871,6 +891,16 @@ class FreehandRasterGeoreferencer(object):
         )
         if getattr(self, "dockPoints", None) is not None:
             self.dockPoints.updatePanel(layer, residuals)
+        tool = getattr(self, "currentTool", None)
+        if (
+            tool is not None
+            and hasattr(tool, "refreshPoints")
+            and getattr(layer, "isReady", bool)()
+        ):
+            # resync the on-map markers too - e.g. right after the lazy
+            # image load of a layer restored from a project (the tools
+            # drew no markers while the raster was still loading)
+            tool.refreshPoints()
 
     def onCenterEdited(self):
         """Center edited in the tie points panel."""
@@ -965,9 +995,35 @@ class FreehandRasterGeoreferencer(object):
         except Exception:
             return ""
 
+    def _warnIfSavedCrsDiffers(self, layer, crsWkt):
+        """Tie points are map coordinates: warn when they were saved in
+        another CRS than the current one (the fit would be wrong)."""
+        if not crsWkt:
+            return
+        try:
+            saved = QgsCoordinateReferenceSystem(crsWkt)
+            if saved.isValid() and layer.crs().isValid() and saved != layer.crs():
+                self.iface.messageBar().pushMessage(
+                    "Freehand Raster Georeferencer",
+                    "The tie points were saved in a different CRS (%s): "
+                    "check the fit before continuing." % saved.description(),
+                    level=1,
+                    duration=6,
+                )
+        except Exception:
+            pass
+
     def saveTiePoints(self):
         layer = self.iface.activeLayer()
         if not isinstance(layer, FreehandRasterGeoreferencerLayer):
+            return
+        if not layer.isReady():
+            self.iface.messageBar().pushMessage(
+                "Freehand Raster Georeferencer",
+                "The raster image is not loaded yet - try again in a moment.",
+                level=1,
+                duration=4,
+            )
             return
         path, _ = QFileDialog.getSaveFileName(
             self.iface.mainWindow(),
@@ -991,6 +1047,27 @@ class FreehandRasterGeoreferencer(object):
                 duration=5,
             )
             return
+        # sidecar with the fit model: the .points CSV of the QGIS
+        # georeferencer cannot hold the transform model, and without it
+        # a polynomial / rubbersheet fit would not come back when the
+        # points are loaded later (best effort - the CSV is saved anyway
+        # when this fails)
+        try:
+            tiepoints.write_model_sidecar(
+                tiepoints.model_sidecar_path(path),
+                {
+                    "fitModel": int(layer.fitModel),
+                    "polyCoeffs": (
+                        [float(v) for v in layer.polyCoeffs]
+                        if layer.polyCoeffs
+                        else None
+                    ),
+                    "tpsFit": dict(layer.tpsFit) if layer.tpsFit else None,
+                    "crsWkt": layer.crs().toWkt(),
+                },
+            )
+        except Exception:
+            pass
         self.iface.messageBar().pushMessage(
             "Freehand Raster Georeferencer",
             "%d tie point(s) saved to %s" % (len(layer.tiePoints), path),
@@ -1001,6 +1078,14 @@ class FreehandRasterGeoreferencer(object):
     def loadTiePoints(self):
         layer = self.iface.activeLayer()
         if not isinstance(layer, FreehandRasterGeoreferencerLayer):
+            return
+        if not layer.isReady():
+            self.iface.messageBar().pushMessage(
+                "Freehand Raster Georeferencer",
+                "The raster image is not loaded yet - try again in a moment.",
+                level=1,
+                duration=4,
+            )
             return
         path, _ = QFileDialog.getOpenFileName(
             self.iface.mainWindow(),
@@ -1029,6 +1114,12 @@ class FreehandRasterGeoreferencer(object):
                 duration=5,
             )
             return
+        # fit model sidecar written by saveTiePoints (the .points CSV
+        # alone cannot hold the transform model: without it a polynomial
+        # / rubbersheet fit would come back as a plain affine fit)
+        model = tiepoints.read_model_sidecar(
+            tiepoints.model_sidecar_path(path)
+        )
         layer.pushHistory(
             {
                 "action": "npfit",
@@ -1040,6 +1131,11 @@ class FreehandRasterGeoreferencer(object):
                 "tiePoints": [dict(p) for p in layer.tiePoints],
             }
         )
+        if model and isinstance(model.get("fitModel"), int):
+            # after pushHistory: the undo entry keeps the model that was
+            # selected BEFORE the load
+            layer.setFitModel(model["fitModel"])
+            self._warnIfSavedCrsDiffers(layer, model.get("crsWkt"))
         layer.setTiePoints(points)
         fitted = layer.applyTiePointFit()
         if self.currentTool and hasattr(self.currentTool, "refreshPoints"):

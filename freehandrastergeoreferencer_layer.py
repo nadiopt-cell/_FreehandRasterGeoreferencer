@@ -78,6 +78,14 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         self.setBlendModeByName(LayerDefaultSettings.BLEND_MODE)
 
         # dummy data: real init is done in intializeLayer
+        # the image MUST exist from the very beginning: a layer restored
+        # from a project is created without a filepath (createLayer) and
+        # loads its image lazily on the first draw / extent request - any
+        # access to self.image before that used to raise AttributeError
+        # ("object has no attribute 'image'") and the exception escaped
+        # into Qt signal handlers, showing the Python error dialog right
+        # after a QGIS restart
+        self.image = None
         self.center = QgsPointXY(0, 0)
         self.rotation = 0.0
         self.xScale = 1.0
@@ -177,10 +185,30 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         Attempts to keep the layer on the same region of the map when
         the map CRS is changed
         """
-        oldCrs = self.crs()
-        newCrs = self.iface.mapCanvas().mapSettings().destinationCrs()
-        self.reprojectTransformParameters(oldCrs, newCrs)
-        self.commitTransformParameters()
+        try:
+            oldCrs = self.crs()
+            newCrs = self.iface.mapCanvas().mapSettings().destinationCrs()
+            self.reprojectTransformParameters(oldCrs, newCrs)
+            if self.isFittedMode() and self.enabledTiePoints():
+                # the fitted coefficients are expressed in map
+                # coordinates and cannot be reprojected: in polynomial /
+                # rubbersheet mode the old fix left STALE coefficients
+                # in place (the raster silently jumped to a wrong
+                # position - "the georeferencing does not survive the
+                # project reload"). Recompute the fit from the
+                # reprojected tie points instead
+                self.applyTiePointFit()
+            else:
+                self.commitTransformParameters()
+        except Exception as ex:
+            # never raise from this Qt signal handler: an escaping
+            # exception shows the Python error dialog and can abort the
+            # project restore
+            QgsMessageLog.logMessage(
+                "Error while adapting the layer to the new CRS: %r" % ex,
+                "FreehandRasterGeoreferencer",
+                Qgis.Warning,
+            )
 
     def setupCrsEvents(self):
         layerId = self.id()
@@ -317,6 +345,24 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
             json.dumps(self.tpsFit) if self.tpsFit is not None else "",
         )
 
+    def isReady(self):
+        """True when the raster image is loaded and usable. A layer
+        restored from a project initializes lazily (the image is loaded
+        on the first draw / extent request): until then the transform
+        maths must not run (self.image is None)."""
+        return (
+            self.initialized
+            and not self.error
+            and self.image is not None
+            and not self.image.isNull()
+        )
+
+    def _imageSize(self):
+        """(width, height) of the raster, or (0, 0) before it is loaded."""
+        if self.image is None:
+            return 0, 0
+        return self.image.width(), self.image.height()
+
     # ------------------------------------------------------------------
     # Coordinate conversions (pixel-center convention, like GDAL GCPs:
     # the center of the first pixel is (0, 0))
@@ -324,9 +370,12 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
 
     def pixelToMap(self, px, py):
         """Map coordinates of a (fractional) pixel center."""
-        w = self.image.width()
-        h = self.image.height()
-        fitted = self.fitTransform()
+        w, h = self._imageSize()
+        # before the image is loaded the fitted coefficients cannot be
+        # evaluated at the right scale: fall back to the classic
+        # parameters (the local affine equivalent restored from the
+        # project) instead of crashing
+        fitted = self.fitTransform() if self.isReady() else None
         if fitted is not None:
             x, y = transform_math.fitted_pixel_to_map(
                 fitted["kind"], fitted["fit"], px, py, w, h
@@ -347,9 +396,8 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
 
     def mapToPixel(self, x, y):
         """(Fractional) pixel coordinates of a map position."""
-        w = self.image.width()
-        h = self.image.height()
-        fitted = self.fitTransform()
+        w, h = self._imageSize()
+        fitted = self.fitTransform() if self.isReady() else None
         if fitted is not None:
             kind, fit = fitted["kind"], fitted["fit"]
             try:
@@ -429,9 +477,8 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
             (p["px"], p["py"], p["mx"], p["my"])
             for p in self.tiePoints
         ]
-        w = self.image.width()
-        h = self.image.height()
-        fitted = self.fitTransform()
+        w, h = self._imageSize()
+        fitted = self.fitTransform() if self.isReady() else None
         if fitted is not None:
             return transform_math.fitted_residuals(
                 fitted["kind"], fitted["fit"], pairs, w, h
@@ -456,6 +503,12 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         (not enough points / degenerate configuration returns False and
         leaves the current transform untouched).
         """
+        if not self.isReady():
+            # the raster is not loaded yet (lazy init after a project
+            # restore): fitting now would use a wrong image size and
+            # corrupt the stored state - refuse until the image is there
+            return False
+
         pairs = [
             (p["px"], p["py"], p["mx"], p["my"])
             for p in self.enabledTiePoints()
@@ -557,6 +610,14 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
 
             self.initialized = True
             self.initializing = False
+
+            # the lazy load just finished (a restored project draws later
+            # than the user can interact): notify the plugin so that the
+            # widgets / markers resync now. Cross-thread safe: Qt queues
+            # the signal when this runs in the render thread
+            self.transformParametersChanged.emit(
+                (self.xScale, self.yScale, self.rotation, self.center)
+            )
 
             self.setupCrs()
 
@@ -768,6 +829,10 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         return layer
 
     def getAbsoluteFilepath(self):
+        if not self.filepath:
+            # a layer restored from a project has no filepath until
+            # readXml fills it (createLayer passes None)
+            return ""
         if not os.path.isabs(self.filepath):
             # relative to QGS file
             qgsPath = QgsProject.instance().fileName()
@@ -787,7 +852,7 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         if self._extent:
             return self._extent
 
-        if self.isFittedMode():
+        if self.isFittedMode() and self.isReady():
             # warped footprint: sample the fitted transform on a grid
             fitted = self.fitTransform()
             if fitted is not None:
@@ -820,14 +885,15 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         )
 
     def transformedCornerCoordinates(self, center, rotation, xScale, yScale):
+        w, h = self._imageSize()
         corners = transform_math.corners(
             center.x(),
             center.y(),
             rotation,
             xScale,
             yScale,
-            self.image.width(),
-            self.image.height(),
+            w,
+            h,
         )
         return tuple(QgsPointXY(x, y) for x, y in corners)
 
@@ -844,8 +910,9 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         dX = (self.center.x() - startPoint.x()) * xScale
         dY = (self.center.y() - startPoint.y()) * yScale
         # Half width and half height in the current transformation
-        hW = (self.image.width() / 2.0) * self.xScale * xScale
-        hH = (self.image.height() / 2.0) * self.yScale * yScale
+        w, h = self._imageSize()
+        hW = (w / 2.0) * self.xScale * xScale
+        hH = (h / 2.0) * self.yScale * yScale
         # Actual rectangle coordinates :
         pt1 = QgsPointXY(-hW, hH)
         pt2 = QgsPointXY(hW, hH)
@@ -1101,8 +1168,8 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         filepath = self.getAbsoluteFilepath()
         filepath = os.path.normpath(filepath)
         lines.append(fmt % (self.tr("Path"), filepath))
-        lines.append(fmt % (self.tr("Image Width"), str(self.image.width())))
-        lines.append(fmt % (self.tr("Image Height"), str(self.image.height())))
+        lines.append(fmt % (self.tr("Image Width"), str(self._imageSize()[0])))
+        lines.append(fmt % (self.tr("Image Height"), str(self._imageSize()[1])))
         lines.append(fmt % (self.tr("Rotation (CW)"), str(self.rotation)))
         lines.append(fmt % (self.tr("X center"), str(self.center.x())))
         lines.append(fmt % (self.tr("Y center"), str(self.center.y())))

@@ -117,6 +117,7 @@ class _QgsRectangle:
 
 class _QgsProject(QObject):
     layerRemoved = pyqtSignal(list)
+    layersRemoved = pyqtSignal(list)
     _inst = None
 
     @classmethod
@@ -275,12 +276,96 @@ def _type_name(self):
     return getattr(self, "_typeName", None)
 
 
-for _name in ("QgsPluginLayer", "QgsPluginLayerType"):
-    setattr(
-        _qcore,
-        _name,
-        type(_name, (), {"__init__": _tolerant_init, "type": _type_name}),
-    )
+class _QgsMapLayerStub(QObject):
+    """Base for the plugin layer: dict-backed custom properties, a CRS
+    slot and the repaintRequested signal (the layer module needs all of
+    them to be instantiable - the restore-guard tests build real
+    FreehandRasterGeoreferencerLayer objects on these stubs)."""
+
+    repaintRequested = pyqtSignal()
+
+    def __init__(self, *args, **kwargs):
+        QObject.__init__(self)
+        self._typeName = args[0] if args else None
+        self._customProperties = {}
+        self._crs = None
+        self._valid = False
+        self._blendMode = 0
+        self._id = "stub-%d" % (id(self),)
+
+    # custom properties (QgsMapLayer API)
+    def setCustomProperty(self, key, value):
+        self._customProperties[key] = value
+
+    def customProperty(self, key, default=None):
+        return self._customProperties.get(key, default)
+
+    def readCustomProperties(self, node, keyPrefix=""):
+        pass
+
+    def writeCustomProperties(self, node, doc):
+        pass
+
+    # misc QgsMapLayer API used by the layer module
+    def id(self):
+        return self._id
+
+    def crs(self):
+        return self._crs
+
+    def setCrs(self, crs):
+        self._crs = crs
+
+    def setValid(self, valid):
+        self._valid = bool(valid)
+
+    def setBlendMode(self, mode):
+        self._blendMode = mode
+
+    def blendMode(self):
+        return self._blendMode
+
+    def triggerRepaint(self):
+        self.repaintRequested.emit()
+
+    def name(self):
+        return getattr(self, "title", "") or "layer"
+
+    def type(self):
+        return _QgsMapLayer.PluginLayer
+
+
+class _QgsPluginLayerStub(_QgsMapLayerStub):
+    def __init__(self, layerType=None, layerName=""):
+        _QgsMapLayerStub.__init__(self)
+        if layerType is not None:
+            self._typeName = layerType
+        self.title = layerName
+
+    def pluginLayerType(self):
+        return self._typeName
+
+
+class _QgsPluginLayerTypeStub:
+    def __init__(self, *args, **kwargs):
+        self._typeName = args[0] if args else None
+
+    def type(self):
+        return self._typeName
+
+
+for _name, _cls in (
+    ("QgsPluginLayer", _QgsPluginLayerStub),
+    ("QgsPluginLayerType", _QgsPluginLayerTypeStub),
+):
+    setattr(_qcore, _name, _cls)
+
+# QgsDataProvider: the layer provider is constructed with a URI argument
+_qcore.QgsDataProvider = type(
+    "QgsDataProvider",
+    (),
+    {"__init__": lambda self, *args, **kwargs: None},
+)
 
 _qgui.QgsMapCanvasItem = _QgsMapCanvasItem
 _qgui.QgsRubberBand = _QgsRubberBand

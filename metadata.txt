@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.9.14
+version = 0.9.15
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,30 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.15
+        * FIX: after a QGIS restart with a saved project, selecting the
+          raster (or using the N-points tool) could raise
+          "AttributeError: 'FreehandRasterGeoreferencerLayer' object has
+          no attribute 'image'" - a restored layer loads its image
+          lazily (on the first map draw) and every transform call before
+          that crashed. The image now always exists, the transform
+          maths tolerate the not-yet-loaded state, the map tool draws no
+          markers until the raster is there (then resyncs on its own),
+          and selecting a layer can no longer raise into the QGIS error
+          dialog
+        * FIX: changing the map CRS while a polynomial / rubbersheet fit
+          was active silently kept the STALE fitted coefficients (they
+          are map-coordinate based and cannot be reprojected) - the
+          raster jumped to a wrong position and the georeferencing
+          looked "not saved entirely" after a project reload. The fit is
+          now recomputed from the reprojected tie points on every CRS
+          change
+        * NEW: "Save tie points" additionally writes a small sidecar
+          (<name>.points.json) holding the fit model + CRS: the .points
+          CSV itself stays 100% compatible with the QGIS georeferencer,
+          but "Load tie points" now restores the polynomial order /
+          rubbersheet model instead of falling back to the affine fit,
+          and warns when the points were saved in another CRS
     0.9.14
         * NEW: the tie points table shows a "#" number column (right after
           the enable checkbox) - the numbers match the point labels drawn

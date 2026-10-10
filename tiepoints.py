@@ -166,3 +166,48 @@ def from_csv(text):
         if p is not None:
             out.append(p)
     return out
+
+
+# --------------------------------------------------------------------------
+# Fit-model sidecar for the .points files
+#
+# The .points CSV is intentionally kept 100% compatible with the QGIS
+# built-in georeferencer: it holds only the point coordinates, so a
+# polynomial / rubbersheet fit cannot be restored from it alone (the
+# points loaded back into a fresh layer used to come out as a plain
+# affine fit - "the georeferencing is not saved entirely"). The model
+# (fit model id + coefficients + CRS) is stored next to the .points file
+# in a small JSON sidecar: <name>.points.json. The QGIS georeferencer
+# ignores the sidecar; this plugin uses it when loading the points back.
+# --------------------------------------------------------------------------
+
+MODEL_SIDECAR_SUFFIX = ".json"
+MODEL_SIDECAR_APP = "FreehandRasterGeoreferencer"
+
+
+def model_sidecar_path(points_path):
+    """Path of the fit-model sidecar for a .points file."""
+    return str(points_path) + MODEL_SIDECAR_SUFFIX
+
+
+def write_model_sidecar(path, model):
+    """Write the fit model dict (fitModel / polyCoeffs / tpsFit / crsWkt)
+    to the sidecar JSON of a .points file."""
+    data = {"app": MODEL_SIDECAR_APP, "version": 1}
+    data.update(model or {})
+    with open(path, "w") as writer:
+        json.dump(data, writer)
+
+
+def read_model_sidecar(path):
+    """Read the fit-model sidecar of a .points file. Returns the parsed
+    dict, or None when the sidecar does not exist / is not ours / is
+    broken (the .points CSV itself always stays loadable)."""
+    try:
+        with open(path) as reader:
+            data = json.load(reader)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("app") != MODEL_SIDECAR_APP:
+        return None
+    return data

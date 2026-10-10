@@ -42,6 +42,14 @@ from .rastershadowmapcanvasitem import RasterShadowMapCanvasItem
 from .tiepointlabelsmapcanvasitem import TiePointLabelsMapCanvasItem
 
 
+def _layer_ready(layer):
+    """True when the layer raster is loaded and the transform maths may
+    run. Tolerates stub / foreign layers without isReady() (treated as
+    ready, like before the guard existed)."""
+    ready = getattr(layer, "isReady", None)
+    return True if ready is None else bool(ready())
+
+
 class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
     def __init__(self, iface, plugin):
         self.iface = iface
@@ -206,6 +214,15 @@ class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
         self.rubberBandResiduals.reset(self._lineGeometry())
 
         if self.layer is None:
+            self.tiePointLabels.clear()
+            return
+
+        if not _layer_ready(self.layer):
+            # a layer restored from a project loads its image lazily
+            # (after the first draw): until then the transform maths
+            # must not run - draw no markers instead of crashing with
+            # AttributeError. refreshPoints runs again as soon as the
+            # image is loaded (transformParametersChanged)
             self.tiePointLabels.clear()
             return
 
