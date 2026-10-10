@@ -358,42 +358,133 @@ class FreehandRasterGeoreferencer(object):
         self.checkCurrentLayerIsPluginLayer()
 
     def unload(self):
-        # Remove the tie points dock
-        if getattr(self, "dockPoints", None) is not None:
-            self.iface.mainWindow().removeDockWidget(self.dockPoints)
-            self.dockPoints.deleteLater()
-            self.dockPoints = None
+        """Full teardown. Every step is guarded: unload() must never raise,
+        otherwise QGIS shows an "Error while unloading plugin" dialog and
+        leaves a half-installed plugin behind (observed when uninstalling
+        while a georeferencing tool was active or when initGui had failed
+        earlier)."""
+        # 1) leave the current tool: reset clears the rubber bands and the
+        #    tie point labels, unsetMapTool detaches it from the canvas
+        #    (deactivate() calls reset() again, that is harmless) and the
+        #    Pan tool takes over so that no dead tool stays on the canvas
+        try:
+            canvas = self.iface.mapCanvas()
+            for name in (
+                "moveTool",
+                "rotateTool",
+                "scaleTool",
+                "adjustTool",
+                "georef2PTool",
+                "georefNPTool",
+            ):
+                tool = getattr(self, name, None)
+                if tool is None:
+                    continue
+                try:
+                    tool.reset()
+                except Exception:
+                    pass
+                try:
+                    canvas.unsetMapTool(tool)
+                except Exception:
+                    pass
+            try:
+                pan = self.iface.actionPan()
+                if pan is not None:
+                    pan.trigger()
+            except Exception:
+                pass
+        except Exception:
+            pass
+        self.currentTool = None
 
-        # Remove the values toolbar
-        if getattr(self, "toolbarValues", None) is not None:
-            self.iface.mainWindow().removeToolBar(self.toolbarValues)
-            del self.toolbarValues
+        # 2) drop the active layer <-> plugin widget connection (the layer
+        #    outlives the plugin in the project: a late
+        #    transformParametersChanged must not reach the unloaded plugin)
+        layer = getattr(self, "layer", None)
+        if layer is not None:
+            try:
+                layer.transformParametersChanged.disconnect(
+                    self.updateTransformWidgets
+                )
+            except Exception:
+                pass
+        self.layer = None
+        self.layers = {}
 
-        # Remove the plugin menu item and icon
-        self.iface.layerToolBar().removeAction(self.actionAddLayer)
-        self.iface.removeAddLayerAction(self.actionAddLayer)
-        self.iface.removePluginRasterMenu(
-            FreehandRasterGeoreferencer.PLUGIN_MENU, self.actionAddLayer
-        )
+        # 3) remove the tie points dock
+        try:
+            dock = getattr(self, "dockPoints", None)
+            if dock is not None:
+                self.iface.mainWindow().removeDockWidget(dock)
+                dock.deleteLater()
+        except Exception:
+            pass
+        self.dockPoints = None
 
-        # Unregister plugin layer type
-        QgsApplication.pluginLayerRegistry().removePluginLayerType(
-            FreehandRasterGeoreferencerLayer.LAYER_TYPE
-        )
+        # 4) remove the values toolbar
+        try:
+            toolbarValues = getattr(self, "toolbarValues", None)
+            if toolbarValues is not None:
+                self.iface.mainWindow().removeToolBar(toolbarValues)
+                toolbarValues.deleteLater()
+        except Exception:
+            pass
+        self.toolbarValues = None
 
-        self.iface.removePluginRasterMenu(
-            FreehandRasterGeoreferencer.PLUGIN_MENU, self.actionSaveTiePoints
-        )
-        self.iface.removePluginRasterMenu(
-            FreehandRasterGeoreferencer.PLUGIN_MENU, self.actionLoadTiePoints
-        )
-        self.iface.removePluginRasterMenu(
-            FreehandRasterGeoreferencer.PLUGIN_MENU, self.actionShowPointsDock
-        )
-        QgsProject.instance().layerRemoved.disconnect(self.layerRemoved)
-        self.iface.currentLayerChanged.disconnect(self.currentLayerChanged)
+        # 5) remove the plugin actions from the layer toolbar, the add
+        #    layer action and the raster menu entries
+        try:
+            action = getattr(self, "actionAddLayer", None)
+            if action is not None:
+                self.iface.layerToolBar().removeAction(action)
+                self.iface.removeAddLayerAction(action)
+                self.iface.removePluginRasterMenu(
+                    FreehandRasterGeoreferencer.PLUGIN_MENU, action
+                )
+        except Exception:
+            pass
+        for name in (
+            "actionSaveTiePoints",
+            "actionLoadTiePoints",
+            "actionShowPointsDock",
+        ):
+            try:
+                action = getattr(self, name, None)
+                if action is not None:
+                    self.iface.removePluginRasterMenu(
+                        FreehandRasterGeoreferencer.PLUGIN_MENU, action
+                    )
+            except Exception:
+                pass
 
-        del self.toolbar
+        # 6) unregister the plugin layer type
+        try:
+            QgsApplication.pluginLayerRegistry().removePluginLayerType(
+                FreehandRasterGeoreferencerLayer.LAYER_TYPE
+            )
+        except Exception:
+            pass
+
+        # 7) disconnect the project / interface signals
+        try:
+            QgsProject.instance().layerRemoved.disconnect(self.layerRemoved)
+        except Exception:
+            pass
+        try:
+            self.iface.currentLayerChanged.disconnect(self.currentLayerChanged)
+        except Exception:
+            pass
+
+        # 8) remove the plugin toolbar
+        try:
+            toolbar = getattr(self, "toolbar", None)
+            if toolbar is not None:
+                self.iface.mainWindow().removeToolBar(toolbar)
+                toolbar.deleteLater()
+        except Exception:
+            pass
+        self.toolbar = None
 
     def layerRemoved(self, layerId):
         if layerId in self.layers:

@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.9.13
+version = 0.9.14
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,17 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.14
+        * NEW: the tie points table shows a "#" number column (right after
+          the enable checkbox) - the numbers match the point labels drawn
+          on the map, so it is immediately clear which table row belongs
+          to which marker (disabled points keep their number, grayed out)
+        * FIX: uninstalling the plugin could raise an "Error while
+          unloading plugin" dialog (e.g. when a georeferencing tool was
+          still active, or when initGui had failed earlier). The unload
+          is now fully guarded: the active map tool is detached from the
+          canvas and its rubber bands / point labels are cleared, the
+          active layer signal is disconnected, and no step can raise
     0.9.13
         * NEW: rubbersheet transformation (thin plate spline) - a new
           "Rubbersheet (thin plate spline)" entry in the fit model combo

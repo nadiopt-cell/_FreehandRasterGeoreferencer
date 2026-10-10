@@ -53,7 +53,17 @@ except AttributeError:  # pragma: no cover - old PyQt5 fallback
     RIGHT_DOCK_AREA = Qt.RightDockWidgetArea
     LEFT_DOCK_AREA = Qt.LeftDockWidgetArea
 
-_HEADERS = ("", "Pixel X", "Pixel Y", "Map X", "Map Y", "dX", "dY", "Residual")
+_HEADERS = (
+    "",
+    "#",
+    "Pixel X",
+    "Pixel Y",
+    "Map X",
+    "Map Y",
+    "dX",
+    "dY",
+    "Residual",
+)
 _GRAY = QColor(128, 128, 128)
 
 # (order, label, tooltip)
@@ -302,6 +312,19 @@ class GeorefPointsDockWidget(QDockWidget):
                 if not enabled:
                     check.setForeground(_GRAY)
 
+                # point number, 1-based row order - the same numbers as
+                # the labels drawn on the map (TiePointLabelsMapCanvasItem)
+                number = QTableWidgetItem(str(i + 1))
+                number.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                number.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+                number.setToolTip(
+                    "Point number, the same as the label next to the "
+                    "point on the map"
+                )
+                if not enabled:
+                    number.setForeground(_GRAY)
+                self.table.setItem(i, 1, number)
+
                 values = (
                     "%.3f" % p["px"],
                     "%.3f" % p["py"],
@@ -311,7 +334,7 @@ class GeorefPointsDockWidget(QDockWidget):
                     "%.4f" % dy,
                     "%.4f" % residual,
                 )
-                for col, text in enumerate(values, start=1):
+                for col, text in enumerate(values, start=2):
                     item = QTableWidgetItem(text)
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                     if not enabled:
