@@ -511,6 +511,101 @@ def poly_map_to_pixel(x, y, fit, w, h, max_iter=30, tol=1e-10):
     return icx + x_c, icy - y_c
 
 
+def poly_map_to_pixel_grid(xs, ys, fit, w, h, max_iter=12, tol=1e-10):
+    """
+    Vectorized poly_map_to_pixel for ARRAYS of map coordinates (same
+    algorithm, same conventions as the scalar version: Newton iteration
+    on the centered Y-up frame, started from the affine equivalent at
+    the image center).
+
+    xs, ys: float arrays (any shape). Returns (px, py, ok): float arrays
+    of (fractional) pixel coordinates and a boolean array, False where
+    the iteration did not converge (degenerate Jacobian / far outside
+    the raster footprint). Never raises.
+    """
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    order = fit["poly"]
+    ncoeff = poly_num_coeffs(order)
+    coeffs = np.asarray(fit["coeffs"], dtype=float)
+    cx_coeffs = coeffs[0:ncoeff]
+    cy_coeffs = coeffs[ncoeff : 2 * ncoeff]
+    basis = _POLY_BASIS[order]
+    icx = (w - 1) / 2.0
+    icy = (h - 1) / 2.0
+
+    # Newton start: affine equivalent at the image center (Jacobian at
+    # (0, 0) of the centered frame), inverted in closed form
+    c0x = cx_coeffs[0]
+    c0y = cy_coeffs[0]
+    j00 = j01 = j10 = j11 = 0.0
+    for k, (i, j) in enumerate(basis):
+        if i == 1:
+            j00 += cx_coeffs[k]
+            j10 += cy_coeffs[k]
+        if j == 1:
+            j01 += cx_coeffs[k]
+            j11 += cy_coeffs[k]
+    det0 = j00 * j11 - j01 * j10
+    if abs(det0) < 1e-30:
+        # degenerate at the center: Newton cannot even start
+        px = np.full(xs.shape, icx)
+        py = np.full(ys.shape, icy)
+        return px, py, np.zeros(xs.shape, dtype=bool)
+    rx0 = xs - c0x
+    ry0 = ys - c0y
+    x = (j11 * rx0 - j01 * ry0) / det0
+    y = (-j10 * rx0 + j00 * ry0) / det0
+
+    # relative tolerance per point, like the scalar version
+    tol_rel = tol * np.maximum(1.0, np.maximum(np.abs(xs), np.abs(ys)))
+
+    done_mask = np.zeros(xs.shape, dtype=bool)
+    for _ in range(max_iter):
+        active = ~done_mask
+        if not active.any():
+            break
+        fx = np.zeros_like(x)
+        fy = np.zeros_like(y)
+        j00a = np.zeros_like(x)
+        j01a = np.zeros_like(x)
+        j10a = np.zeros_like(x)
+        j11a = np.zeros_like(x)
+        for k, (i, j) in enumerate(basis):
+            m = (x ** i) * (y ** j)
+            fx = fx + cx_coeffs[k] * m
+            fy = fy + cy_coeffs[k] * m
+            if i > 0:
+                dm = i * (x ** (i - 1)) * (y ** j)
+                j00a = j00a + cx_coeffs[k] * dm
+                j10a = j10a + cy_coeffs[k] * dm
+            if j > 0:
+                dm = j * (x ** i) * (y ** (j - 1))
+                j01a = j01a + cx_coeffs[k] * dm
+                j11a = j11a + cy_coeffs[k] * dm
+        rx = fx - xs
+        ry = fy - ys
+        done_mask = done_mask | (
+            active & (np.abs(rx) < tol_rel) & (np.abs(ry) < tol_rel)
+        )
+        step = active & ~done_mask
+        if not step.any():
+            break
+        det = j00a * j11a - j01a * j10a
+        good = step & (np.abs(det) > 1e-30) & np.isfinite(det)
+        # pixels with a singular Jacobian can never take a step: they stay
+        # not converged (done_mask stays False for them)
+        with np.errstate(all="ignore"):
+            dx = np.where(good, (j11a * rx - j01a * ry) / np.where(good, det, 1.0), 0.0)
+            dy = np.where(good, (-j10a * rx + j00a * ry) / np.where(good, det, 1.0), 0.0)
+            x = np.where(good, x - dx, x)
+            y = np.where(good, y - dy, y)
+
+    px = icx + x
+    py = icy - y
+    return px, py, done_mask
+
+
 def poly_local_params(fit, w, h):
     """
     Affine (classic) parameters equivalent to the polynomial locally at

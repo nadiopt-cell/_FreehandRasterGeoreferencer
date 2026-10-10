@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.9.15
+version = 0.9.16
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,25 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.16
+        * FIX: the exported raster did not match what the canvas shows
+          when a polynomial fit was active (reported as "the 3rd-degree
+          polynomial georeferencing is not saved entirely"). The export
+          passed a GCP grid sampled from the layer's polynomial to
+          gdal.Warp and let GDAL re-fit ITS OWN polynomial through the
+          samples - that least squares is catastrophically conditioned
+          in raw pixel coordinates, so on the large rasters this plugin
+          serves GDAL's re-fit diverged from the layer's transform
+          (measured: up to ~700 m on a 20000 x 15000 scan, 99% of the
+          pixels wrong; small rasters were fine, which made the bug hard
+          to pin down). The export now warps with the LAYER's
+          coefficients directly - every output pixel is inverse-mapped
+          with the same maths the canvas uses. Measured on the same
+          20000 x 15000 raster: 0 mismatches
+        * the polynomial export keeps the source data type (UInt16
+          etc.), expands paletted sources to RGB, writes an alpha band
+          for the warped border and supports the near / bilinear /
+          cubic resampling choices of the dialog exactly
     0.9.15
         * FIX: after a QGIS restart with a saved project, selecting the
           raster (or using the N-points tool) could raise

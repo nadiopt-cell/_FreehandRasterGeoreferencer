@@ -18,7 +18,7 @@ from PyQt5.QtGui import QColor, QImage, QImageWriter, QPainter
 from qgis.core import Qgis, QgsMessageLog
 from qgis.gui import QgsMessageBar
 
-from . import export_options, transform_math, utils
+from . import export_options, polywarp, transform_math, utils
 
 
 class ExportGeorefRasterCommand(object):
@@ -505,20 +505,6 @@ class ExportGeorefRasterCommand(object):
         )
         self.iface.messageBar().pushWidget(widget, Qgis.Info, 3)
 
-    def _polyGcpGrid(self, layer, fit, width, height, crsWkt, per_axis=9):
-        """GCP grid sampled from the polynomial (GDAL pixel/line
-        convention: the center of the first pixel is (0.5, 0.5))."""
-        gcps = []
-        for j in range(per_axis):
-            py = j * (height - 1) / float(per_axis - 1)
-            for i in range(per_axis):
-                px = i * (width - 1) / float(per_axis - 1)
-                mx, my = transform_math.poly_pixel_to_map(
-                    px, py, fit, width, height
-                )
-                gcps.append(gdal.GCP(mx, my, 0.0, px + 0.5, py + 0.5))
-        return gcps
-
     def _exportPolyWarp(
         self, layer, rasterPath, fit, isExportCOG, resamplingMethod,
         compression=export_options.DEFLATE,
@@ -534,48 +520,89 @@ class ExportGeorefRasterCommand(object):
             if ext.lower() not in (".tif", ".tiff"):
                 rasterPath = base + ".tif"
 
-        vrtPath, vrt = self._sourceVrt(srcPath)
-        try:
-            gcps = self._polyGcpGrid(layer, fit, width, height, crsWkt)
-            vrt.SetGCPs(gcps, crsWkt)
+        # output bounds from the warped footprint, snapped OUTWARD to
+        # whole local pixels so that nothing is clipped; the local
+        # pixel size at the image center (kept in the classic
+        # parameters by applyTiePointFit) is the output resolution
+        extent = layer.extent()
+        xScale = layer.xScale or 1.0
+        yScale = layer.yScale or 1.0
+        minX = math.floor(extent.xMinimum() / xScale) * xScale
+        maxX = math.ceil(extent.xMaximum() / xScale) * xScale
+        minY = math.floor(extent.yMinimum() / yScale) * yScale
+        maxY = math.ceil(extent.yMaximum() / yScale) * yScale
 
-            # output bounds from the warped footprint, snapped OUTWARD to
-            # whole local pixels so that nothing is clipped
-            extent = layer.extent()
-            xScale = layer.xScale or 1.0
-            yScale = layer.yScale or 1.0
-            minX = math.floor(extent.xMinimum() / xScale) * xScale
-            maxX = math.ceil(extent.xMaximum() / xScale) * xScale
-            minY = math.floor(extent.yMinimum() / yScale) * yScale
-            maxY = math.ceil(extent.yMaximum() / yScale) * yScale
+        # EXACT warp: the layer's polynomial coefficients are evaluated
+        # per output pixel (polywarp). The previous implementation asked
+        # gdal.Warp to fit ITS OWN polynomial through a GCP grid sampled
+        # from the layer's fit - the least squares in raw pixel
+        # coordinates is catastrophically conditioned for the large
+        # rasters this plugin serves, so GDAL's re-fit diverged from the
+        # layer's transform by tens / hundreds of map units and the
+        # export did not match the canvas.
+        bandType, outBands = polywarp.output_info(srcPath)
+        driverName = "COG" if isExportCOG else "GTiff"
+        creationOptions, warning = export_options.rasterCreationOptions(
+            compression, bandType, outBands, driverName
+        )
+        if warning:
+            QgsMessageLog.logMessage("Raster Geoferencer: " + warning)
+            widget = QgsMessageBar.createMessage("Raster Geoferencer", warning)
+            self.iface.messageBar().pushWidget(widget, Qgis.Warning, 6)
+        creationOptions = list(creationOptions) + [self.BIGTIFF_OPTION]
+        if not isExportCOG:
+            creationOptions = [
+                "TILED=YES",
+                "BLOCKXSIZE=512",
+                "BLOCKYSIZE=512",
+            ] + creationOptions
 
-            warpOptions = dict(
-                format="COG" if isExportCOG else "GTiff",
-                dstSRS=crsWkt,
-                resampleAlg=resamplingMethod,
-                dstAlpha=True,
-                outputBounds=(minX, minY, maxX, maxY),
-                xRes=xScale,
-                yRes=yScale,
-                # make GDAL fit the SAME polynomial order as the layer
-                transformerOptions=["ORDER=%d" % fit["poly"]],
-            )
-            if isExportCOG:
-                warpOptions["creationOptions"] = self._creationOptions(
-                    "COG", vrt, compression, addAlpha=True
-                ) + [self.BIGTIFF_OPTION]
-            else:
-                warpOptions["creationOptions"] = [
-                    "TILED=YES",
-                    "BLOCKXSIZE=512",
-                    "BLOCKYSIZE=512",
-                    self.BIGTIFF_OPTION,
-                ] + self._creationOptions(
-                    "GTiff", vrt, compression, addAlpha=True
+        if isExportCOG:
+            # build a plain (tiled) GeoTIFF first, then COG CreateCopy -
+            # the COG driver cannot take the warp output options directly
+            tempPath = "/vsimem/fhrgr_polywarp_%d.tif" % id(self)
+            try:
+                polywarp.warp_poly(
+                    srcPath,
+                    tempPath,
+                    fit,
+                    width,
+                    height,
+                    crsWkt,
+                    (minX, minY, maxX, maxY),
+                    xScale,
+                    yScale,
+                    resampling=resamplingMethod,
+                    creationOptions=["TILED=YES", "BIGTIFF=IF_SAFER"],
                 )
-            gdal.Warp(rasterPath, vrt, **warpOptions)
-        finally:
-            gdal.Unlink(vrtPath)
+                temp = gdal.Open(tempPath)
+                cogDrv = gdal.GetDriverByName("COG")
+                result = cogDrv.CreateCopy(
+                    rasterPath, temp, options=creationOptions
+                )
+                if result is None:
+                    raise RuntimeError("COG CreateCopy failed")
+                result = None
+                temp = None
+            finally:
+                try:
+                    gdal.Unlink(tempPath)
+                except Exception:
+                    pass
+        else:
+            polywarp.warp_poly(
+                srcPath,
+                rasterPath,
+                fit,
+                width,
+                height,
+                crsWkt,
+                (minX, minY, maxX, maxY),
+                xScale,
+                yScale,
+                resampling=resamplingMethod,
+                creationOptions=creationOptions,
+            )
 
     # ------------------------------------------------------------------
     # Rubbersheet (thin plate spline) export: the ENABLED tie points go
