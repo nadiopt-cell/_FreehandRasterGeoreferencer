@@ -167,10 +167,7 @@ class GeorefRasterByNPointsMapTool(QgsMapToolEmitPoint):
                 "rotation": self.layer.rotation,
                 "xScale": self.layer.xScale,
                 "yScale": self.layer.yScale,
-                "fitModel": self.layer.fitModel,
-                "polyCoeffs": list(self.layer.polyCoeffs)
-                if self.layer.polyCoeffs
-                else None,
+                "fitState": self.layer.fitStateSnapshot(),
                 "tiePoints": [dict(p) for p in self.layer.tiePoints],
             }
         )

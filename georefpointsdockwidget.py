@@ -85,6 +85,14 @@ _FIT_MODELS = (
         " Most flexible, least stable: use only with many well spread"
         " points.",
     ),
+    (
+        4,
+        "Rubbersheet (thin plate spline)",
+        "Thin plate spline (rubbersheet, like ArcGIS Spline / the QGIS"
+        " georeferencer TPS): the surface passes EXACTLY through every"
+        " enabled tie point and bends smoothly between them. 3 points"
+        " minimum; extrapolation outside the point hull can overshoot.",
+    ),
 )
 
 
@@ -256,6 +264,10 @@ class GeorefPointsDockWidget(QDockWidget):
     def _updateFitModelHint(self, order):
         if order == 0:
             self.labelFitModelHint.setText("")
+        elif order == transform_math.TPS_ORDER:
+            self.labelFitModelHint.setText(
+                "min %d points" % transform_math.tps_min_points()
+            )
         else:
             self.labelFitModelHint.setText(
                 "min %d points" % transform_math.poly_min_points(order)
@@ -313,10 +325,10 @@ class GeorefPointsDockWidget(QDockWidget):
             self.buttonDelete.setEnabled(bool(points))
             self.buttonClear.setEnabled(bool(points))
             # the numeric transform controls follow the layer presence and
-            # are read-only in polynomial mode (they only DISPLAY the local
+            # are read-only in fitted mode (they only DISPLAY the local
             # equivalent values there)
-            polyMode = layer is not None and layer.isPolyMode()
-            self.groupTransform.setEnabled(layer is not None and not polyMode)
+            fittedMode = layer is not None and layer.isFittedMode()
+            self.groupTransform.setEnabled(layer is not None and not fittedMode)
             self.comboFitModel.setEnabled(layer is not None)
             if layer is not None:
                 self.setFitModelValue(layer.fitModel)

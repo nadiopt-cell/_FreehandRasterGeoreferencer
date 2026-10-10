@@ -35,18 +35,36 @@ class ExportGeorefRasterCommand(object):
         resamplingMethod="near",
         compression=export_options.DEFLATE,
     ):
-        # polynomial fit model (order 1/2/3): dedicated export path (the
-        # classic center / rotation / scale parameters do not describe the
-        # transform then)
-        if hasattr(layer, "polyFit") and layer.polyFit() is not None:
-            self.exportPoly(
-                layer,
-                rasterPath,
-                isExportOnlyWorldFile,
-                isExportCOG,
-                resamplingMethod,
-                compression,
-            )
+        # fitted transform (polynomial 1/2/3 or rubbersheet TPS): dedicated
+        # export paths (the classic center / rotation / scale parameters do
+        # not describe the transform then)
+        fitted = None
+        if hasattr(layer, "fitTransform"):
+            fitted = layer.fitTransform()
+        elif hasattr(layer, "polyFit"):
+            # older stub layers only expose polyFit
+            polyFit = layer.polyFit()
+            if polyFit is not None:
+                fitted = {"kind": "poly", "fit": polyFit}
+        if fitted is not None:
+            if fitted["kind"] == "tps":
+                self.exportTps(
+                    layer,
+                    rasterPath,
+                    isExportOnlyWorldFile,
+                    isExportCOG,
+                    resamplingMethod,
+                    compression,
+                )
+            else:
+                self.exportPoly(
+                    layer,
+                    rasterPath,
+                    isExportOnlyWorldFile,
+                    isExportCOG,
+                    resamplingMethod,
+                    compression,
+                )
             return
 
         if isExportCOG and not isExportOnlyWorldFile:
@@ -541,6 +559,129 @@ class ExportGeorefRasterCommand(object):
                 yRes=yScale,
                 # make GDAL fit the SAME polynomial order as the layer
                 transformerOptions=["ORDER=%d" % fit["poly"]],
+            )
+            if isExportCOG:
+                warpOptions["creationOptions"] = self._creationOptions(
+                    "COG", vrt, compression, addAlpha=True
+                ) + [self.BIGTIFF_OPTION]
+            else:
+                warpOptions["creationOptions"] = [
+                    "TILED=YES",
+                    "BLOCKXSIZE=512",
+                    "BLOCKYSIZE=512",
+                    self.BIGTIFF_OPTION,
+                ] + self._creationOptions(
+                    "GTiff", vrt, compression, addAlpha=True
+                )
+            gdal.Warp(rasterPath, vrt, **warpOptions)
+        finally:
+            gdal.Unlink(vrtPath)
+
+    # ------------------------------------------------------------------
+    # Rubbersheet (thin plate spline) export: the ENABLED tie points go
+    # straight to GDAL as GCPs with the TPS transformer. The thin plate
+    # spline interpolant of a given set of correspondences is unique, so
+    # GDAL reproduces EXACTLY the surface shown on the canvas (same tie
+    # points, same weights - no resampling of the fit needed).
+    # ------------------------------------------------------------------
+
+    def exportTps(
+        self,
+        layer,
+        rasterPath,
+        isExportOnlyWorldFile,
+        isExportCOG,
+        resamplingMethod,
+        compression=export_options.DEFLATE,
+    ):
+        try:
+            if isExportOnlyWorldFile:
+                widget = QgsMessageBar.createMessage(
+                    "Raster Geoferencer",
+                    "A world file cannot encode the rubbersheet (TPS) "
+                    "transform. Use the full raster export or the COG "
+                    "export instead.",
+                )
+                self.iface.messageBar().pushWidget(widget, Qgis.Warning, 6)
+                return
+            self._exportTpsWarp(
+                layer, rasterPath, isExportCOG, resamplingMethod, compression
+            )
+            widget = QgsMessageBar.createMessage(
+                "Raster Geoferencer", "Raster exported successfully."
+            )
+            self.iface.messageBar().pushWidget(widget, Qgis.Info, 2)
+        except Exception as ex:
+            QgsMessageLog.logMessage(repr(ex))
+            widget = QgsMessageBar.createMessage(
+                "Raster Geoferencer",
+                "There was an error exporting the raster. "
+                "See QGIS Message log for details.",
+            )
+            self.iface.messageBar().pushWidget(widget, Qgis.Critical, 5)
+
+    def _tpsGcps(self, layer, crsWkt):
+        """GDAL GCPs from the enabled tie points (GDAL pixel/line
+        convention: the center of the first pixel is (0.5, 0.5))."""
+        gcps = []
+        for point in layer.enabledTiePoints():
+            gcps.append(
+                gdal.GCP(
+                    point["mx"], point["my"], 0.0, point["px"] + 0.5, point["py"] + 0.5
+                )
+            )
+        return gcps
+
+    def _exportTpsWarp(
+        self,
+        layer,
+        rasterPath,
+        isExportCOG,
+        resamplingMethod,
+        compression=export_options.DEFLATE,
+    ):
+        srcPath = layer.getAbsoluteFilepath()
+        crsWkt = self.iface.mapCanvas().mapSettings().destinationCrs().toWkt()
+
+        gcps = self._tpsGcps(layer, crsWkt)
+        if len(gcps) < transform_math.tps_min_points():
+            raise RuntimeError(
+                "The rubbersheet (TPS) export needs at least %d enabled "
+                "tie points (%d found)"
+                % (transform_math.tps_min_points(), len(gcps))
+            )
+
+        # the warp writes a GeoTIFF: normalize the extension when needed
+        if not isExportCOG:
+            base, ext = os.path.splitext(rasterPath)
+            if ext.lower() not in (".tif", ".tiff"):
+                rasterPath = base + ".tif"
+
+        vrtPath, vrt = self._sourceVrt(srcPath)
+        try:
+            vrt.SetGCPs(gcps, crsWkt)
+
+            # output bounds from the warped footprint, snapped OUTWARD to
+            # whole local pixels so that nothing is clipped; the local
+            # pixel size at the image center (kept in the classic
+            # parameters by applyTiePointFit) is the output resolution
+            extent = layer.extent()
+            xScale = layer.xScale or 1.0
+            yScale = layer.yScale or 1.0
+            minX = math.floor(extent.xMinimum() / xScale) * xScale
+            maxX = math.ceil(extent.xMaximum() / xScale) * xScale
+            minY = math.floor(extent.yMinimum() / yScale) * yScale
+            maxY = math.ceil(extent.yMaximum() / yScale) * yScale
+
+            warpOptions = dict(
+                format="COG" if isExportCOG else "GTiff",
+                dstSRS=crsWkt,
+                resampleAlg=resamplingMethod,
+                dstAlpha=True,
+                outputBounds=(minX, minY, maxX, maxY),
+                xRes=xScale,
+                yRes=yScale,
+                tps=True,
             )
             if isExportCOG:
                 warpOptions["creationOptions"] = self._creationOptions(

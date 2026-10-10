@@ -487,11 +487,15 @@ def poly_map_to_pixel(x, y, fit, w, h, max_iter=30, tol=1e-10):
     # (x, y) offsets, whose origin IS the image center)
     x_c = 0.0
     y_c = 0.0
+    # relative convergence threshold: with projected map coordinates
+    # (magnitudes ~1e6+) an ABSOLUTE 1e-10 is below the double precision
+    # noise of the residual and Newton would never stop iterating
+    tol_rel = tol * max(1.0, abs(x), abs(y))
     for _ in range(max_iter):
         fx, fy = evalXY(x_c, y_c)
         rx = fx - x
         ry = fy - y
-        if abs(rx) < tol and abs(ry) < tol:
+        if abs(rx) < tol_rel and abs(ry) < tol_rel:
             break
         j00, j01, j10, j11 = jacobian(x_c, y_c)
         det = j00 * j11 - j01 * j10
@@ -578,6 +582,244 @@ def poly1_world_file(fit, w, h):
     c = c00 - a * icx - b * icy
     f = c10 - d * icx - e * icy
     return (a, d, b, e, c, f)
+
+
+# ---------------------------------------------------------------------------
+# Rubbersheet transform (thin plate spline, TPS)
+#
+# Same centered Y-up pixel-offset frame as the polynomials. For each output
+# coordinate the surface is
+#     f(p) = a1 + ax * x + ay * y + sum_i w_i * U(|p - c_i|)
+# with U(r) = r^2 * ln(r) (U(0) = 0), c_i the control points and the
+# coefficients solving the Bookstein bordered system
+#     [ K    P ] [w]   [V]
+#     [ P^T  0 ] [a] = [0]
+# (K_ij = U(|c_i - c_j|), P rows = [1, x, y]). The thin plate spline is the
+# unique interpolant of minimal bending energy: it passes EXACTLY through
+# every control point - the "rubbersheet" behaviour. Source offsets are
+# normalized by the extent of the tie points for conditioning; the weights
+# and the affine part are solved in the normalized frame and "norm" scales
+# back (pixel offsets, and only them).
+# ---------------------------------------------------------------------------
+
+TPS_ORDER = 4
+TPS_MIN_POINTS = 3
+
+
+def tps_min_points():
+    """Minimum number of enabled tie points for the rubbersheet fit."""
+    return TPS_MIN_POINTS
+
+
+def _tps_U_from_sqdist(d2):
+    """U evaluated from SQUARED distances (vectorized): U = r^2 * ln(r),
+    with U = 0.5 * d2 * ln(d2) for d2 > 0 (same value, better numerics)."""
+    d2 = np.asarray(d2, dtype=float)
+    out = np.zeros(d2.shape, dtype=float)
+    positive = d2 > 1e-300
+    out[positive] = 0.5 * d2[positive] * np.log(d2[positive])
+    return out
+
+
+def fit_tps(pairs, w, h):
+    """
+    Fit a thin plate spline (rubbersheet) through the tie points.
+    Returns dict(tps=True, src=[[x,y],...], norm=float, coeffs=[...]) or
+    None when there are fewer than 3 points.
+    coeffs layout (per output coordinate): [w_0..w_{n-1}, a1, ax, ay].
+    """
+    n = len(pairs)
+    if n < TPS_MIN_POINTS:
+        return None
+    src, dst = _pairs_to_arrays(pairs, w, h)
+
+    # normalize the source offsets (pixel spans can reach thousands of
+    # pixels: without normalization the K matrix would span many orders
+    # of magnitude and the linear solve would lose precision)
+    span = max(
+        float(src[:, 0].max() - src[:, 0].min()),
+        float(src[:, 1].max() - src[:, 1].min()),
+    )
+    norm = span if span > 1e-9 else 1.0
+    sn = src / norm
+
+    d2 = ((sn[:, None, :] - sn[None, :, :]) ** 2).sum(axis=2)
+    mat = np.zeros((n + 3, n + 3))
+    mat[:n, :n] = _tps_U_from_sqdist(d2)
+    mat[:n, n:] = np.column_stack([np.ones(n), sn])
+    mat[n:, :n] = mat[:n, n:].T
+    rhs = np.zeros((n + 3, 2))
+    rhs[:n] = dst
+    try:
+        # lstsq (not solve): duplicated / nearly degenerate control points
+        # still produce the least-squares compromise instead of an error
+        sol, _, _, _ = np.linalg.lstsq(mat, rhs, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+    coeffs = []
+    for component in range(2):
+        coeffs.extend(float(v) for v in sol[:n, component])
+        coeffs.extend(float(v) for v in sol[n : n + 3, component])
+    return {
+        "tps": True,
+        "src": [[float(x), float(y)] for x, y in src],
+        "norm": float(norm),
+        "coeffs": coeffs,
+    }
+
+
+def _tps_parts(fit):
+    """(normalized control points (N,2), norm, weights (N,2), affineX (3,),
+    affineY (3,)) of a TPS fit dict."""
+    src = np.asarray(fit["src"], dtype=float)
+    n = src.shape[0]
+    norm = float(fit.get("norm", 1.0))
+    if not norm or norm <= 0:
+        norm = 1.0
+    coeffs = np.asarray(fit["coeffs"], dtype=float)
+    if coeffs.size < 2 * n + 6:
+        raise ValueError("TPS fit is truncated")
+    wgt = np.column_stack([coeffs[0:n], coeffs[n + 3 : 2 * n + 3]])
+    affX = coeffs[n : n + 3]
+    affY = coeffs[2 * n + 3 : 2 * n + 6]
+    return src / norm, norm, wgt, affX, affY
+
+
+def _tps_eval_and_jacobian(x, y, sn, wgt, affX, affY):
+    """
+    Value and Jacobian of the TPS surface at a NORMALIZED offset (x, y).
+    Returns (fx, fy, j00, j01, j10, j11); the derivatives are with respect
+    to the normalized offsets. dU/dx = dx * (ln d2 + 2), 0 at d2 = 0.
+    """
+    dx = x - sn[:, 0]
+    dy = y - sn[:, 1]
+    d2 = dx * dx + dy * dy
+    far = d2 > 1e-300
+    u = np.zeros_like(d2)
+    u[far] = 0.5 * d2[far] * np.log(d2[far])
+    g = np.zeros_like(d2)
+    g[far] = np.log(d2[far]) + 2.0
+    gx = dx * g
+    gy = dy * g
+    fx = float(u @ wgt[:, 0]) + affX[0] + affX[1] * x + affX[2] * y
+    fy = float(u @ wgt[:, 1]) + affY[0] + affY[1] * x + affY[2] * y
+    j00 = float(gx @ wgt[:, 0]) + affX[1]
+    j01 = float(gy @ wgt[:, 0]) + affX[2]
+    j10 = float(gx @ wgt[:, 1]) + affY[1]
+    j11 = float(gy @ wgt[:, 1]) + affY[2]
+    return fx, fy, j00, j01, j10, j11
+
+
+def tps_pixel_to_map(px, py, fit, w, h):
+    """Map coordinates of a (fractional) pixel center under a TPS fit."""
+    icx = (w - 1) / 2.0
+    icy = (h - 1) / 2.0
+    sn, norm, wgt, affX, affY = _tps_parts(fit)
+    fx, fy = _tps_eval_and_jacobian(
+        (px - icx) / norm, (icy - py) / norm, sn, wgt, affX, affY
+    )[:2]
+    return fx, fy
+
+
+def tps_map_to_pixel(x, y, fit, w, h, max_iter=40, tol=1e-10):
+    """
+    (Fractional) pixel coordinates of a map position: Newton iteration on
+    the TPS, started from the inverse of its affine part. Raises
+    ValueError when it does not converge (target far outside the raster
+    footprint).
+    """
+    icx = (w - 1) / 2.0
+    icy = (h - 1) / 2.0
+    sn, norm, wgt, affX, affY = _tps_parts(fit)
+
+    # Newton start: invert the affine part (normalized frame)
+    a00, a01, a10, a11 = affX[1], affX[2], affY[1], affY[2]
+    det = a00 * a11 - a01 * a10
+    rx = x - affX[0]
+    ry = y - affY[0]
+    if abs(det) > 1e-30:
+        qx = (a11 * rx - a01 * ry) / det
+        qy = (-a10 * rx + a00 * ry) / det
+    else:
+        qx = qy = 0.0
+
+    # relative convergence threshold: with projected map coordinates
+    # (magnitudes ~1e6+) an ABSOLUTE 1e-10 is below the double precision
+    # noise of the residual and Newton would never stop iterating
+    tol_rel = tol * max(1.0, abs(x), abs(y))
+    for _ in range(max_iter):
+        fx, fy, j00, j01, j10, j11 = _tps_eval_and_jacobian(
+            qx, qy, sn, wgt, affX, affY
+        )
+        rx = fx - x
+        ry = fy - y
+        if abs(rx) < tol_rel and abs(ry) < tol_rel:
+            break
+        det = j00 * j11 - j01 * j10
+        if abs(det) < 1e-30:
+            raise ValueError("Singular Jacobian: cannot invert the rubbersheet")
+        dqx = (j11 * rx - j01 * ry) / det
+        dqy = (-j10 * rx + j00 * ry) / det
+        qx -= dqx
+        qy -= dqy
+    else:
+        raise ValueError("Rubbersheet inversion did not converge")
+
+    return icx + qx * norm, icy - qy * norm
+
+
+def tps_local_params(fit, w, h):
+    """
+    Affine (classic) parameters equivalent to the rubbersheet locally at
+    the image center: position of the center pixel and the Jacobian there
+    decomposed into rotation + positive scales (like poly_local_params for
+    the polynomials). Used to show meaningful values in the numeric widgets
+    and as export hints.
+    """
+    sn, norm, wgt, affX, affY = _tps_parts(fit)
+    fx, fy, j00, j01, j10, j11 = _tps_eval_and_jacobian(
+        0.0, 0.0, sn, wgt, affX, affY
+    )
+    # derivatives were computed in the normalized frame: scale back to
+    # "map units per pixel"
+    sx = math.hypot(j00, j10) / norm
+    sy = math.hypot(j01, j11) / norm
+    theta = math.atan2(j10, j00)  # math CCW
+    rotation = -math.degrees(theta)  # visual CW degrees
+    return {
+        "cx": fx,
+        "cy": fy,
+        "rotation": normalize_rotation(rotation),
+        "xScale": sx,
+        "yScale": sy,
+    }
+
+
+def tps_residuals(pairs, fit, w, h):
+    """Per-point residuals (target - predicted) for a TPS fit + rms."""
+    if not pairs:
+        return [], 0.0
+    res = []
+    for px, py, mx, my in pairs:
+        ex, ey = tps_pixel_to_map(px, py, fit, w, h)
+        res.append((mx - ex, my - ey))
+    sq = [(rx * rx + ry * ry) for rx, ry in res]
+    rms = math.sqrt(sum(sq) / len(sq))
+    return res, rms
+
+
+def fitted_pixel_to_map(kind, fit, px, py, w, h):
+    """Dispatch pixel->map over a fitted transform ('poly' or 'tps')."""
+    if kind == "tps":
+        return tps_pixel_to_map(px, py, fit, w, h)
+    return poly_pixel_to_map(px, py, fit, w, h)
+
+
+def fitted_residuals(kind, fit, pairs, w, h):
+    """Dispatch per-point residuals over a fitted transform kind."""
+    if kind == "tps":
+        return tps_residuals(pairs, fit, w, h)
+    return poly_residuals(pairs, fit, w, h)
 
 
 def affine_from_correspondences(src, dst):

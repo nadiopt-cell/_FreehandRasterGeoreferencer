@@ -83,9 +83,11 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         self.xScale = 1.0
         self.yScale = 1.0
         # fit model: 0 = similarity / anisotropic scaled rotation,
-        # 1/2/3 = polynomial of that order (see transform_math)
+        # 1/2/3 = polynomial of that order, 4 = rubbersheet / thin plate
+        # spline (see transform_math)
         self.fitModel = 0
         self.polyCoeffs = None
+        self.tpsFit = None
 
         self.error = False
         self.initializing = False
@@ -224,19 +226,33 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         """True when a polynomial fit model (order >= 1) is selected."""
         return self.fitModel in transform_math.POLY_ORDERS
 
+    def isTPSMode(self):
+        """True when the rubbersheet (thin plate spline) model is selected."""
+        return self.fitModel == transform_math.TPS_ORDER
+
+    def isFittedMode(self):
+        """True when a fitted transform (polynomial or rubbersheet) is
+        selected: the classic parameters then only DISPLAY the local
+        affine equivalent and the manual tools do not apply."""
+        return self.isPolyMode() or self.isTPSMode()
+
     def setFitModel(self, order):
         """
-        Select the fit model (0 = classic, 1/2/3 = polynomial order) and
-        persist it. The coefficients are cleared: they are recomputed by
-        the next applyTiePointFit().
+        Select the fit model (0 = classic, 1/2/3 = polynomial order,
+        4 = rubbersheet / TPS) and persist it. The coefficients are
+        cleared: they are recomputed by the next applyTiePointFit().
         """
-        if order not in (0,) + transform_math.POLY_ORDERS:
+        if order not in (0,) + transform_math.POLY_ORDERS + (
+            transform_math.TPS_ORDER,
+        ):
             order = 0
         self.fitModel = int(order)
         self.polyCoeffs = None
+        self.tpsFit = None
         self._extent = None
         self.setCustomProperty("fitModel", self.fitModel)
         self.setCustomProperty("polyCoeffs", "")
+        self.setCustomProperty("tpsFit", "")
 
     def polyFit(self):
         """The current polynomial fit as transform_math expects, or None."""
@@ -244,11 +260,61 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
             return {"poly": self.fitModel, "coeffs": list(self.polyCoeffs)}
         return None
 
+    def tpsFitDict(self):
+        """The current rubbersheet (TPS) fit as transform_math expects,
+        or None."""
+        if self.isTPSMode() and self.tpsFit:
+            return dict(self.tpsFit)
+        return None
+
+    def fitTransform(self):
+        """The fitted transform in effect:
+        {"kind": "poly" | "tps", "fit": <fit dict>}, or None in classic
+        mode."""
+        if self.isPolyMode() and self.polyCoeffs:
+            return {
+                "kind": "poly",
+                "fit": {"poly": self.fitModel, "coeffs": list(self.polyCoeffs)},
+            }
+        if self.isTPSMode() and self.tpsFit:
+            return {"kind": "tps", "fit": dict(self.tpsFit)}
+        return None
+
+    def fitStateSnapshot(self):
+        """Snapshot of the fit model state (model id + coefficients) for
+        the undo history."""
+        tps = None
+        if self.tpsFit:
+            tps = {
+                "tps": True,
+                "norm": self.tpsFit.get("norm", 1.0),
+                "src": [list(s) for s in self.tpsFit.get("src", [])],
+                "coeffs": list(self.tpsFit.get("coeffs", [])),
+            }
+        return {
+            "fitModel": self.fitModel,
+            "polyCoeffs": list(self.polyCoeffs) if self.polyCoeffs else None,
+            "tpsFit": tps,
+        }
+
+    def restoreFitState(self, state):
+        """Restore a snapshot taken by fitStateSnapshot()."""
+        self.fitModel = int(state.get("fitModel", 0))
+        poly = state.get("polyCoeffs")
+        self.polyCoeffs = list(poly) if poly else None
+        tps = state.get("tpsFit")
+        self.tpsFit = dict(tps) if tps else None
+        self._extent = None
+
     def _storePolyState(self):
         self.setCustomProperty("fitModel", self.fitModel)
         self.setCustomProperty(
             "polyCoeffs",
             json.dumps(self.polyCoeffs) if self.polyCoeffs is not None else "",
+        )
+        self.setCustomProperty(
+            "tpsFit",
+            json.dumps(self.tpsFit) if self.tpsFit is not None else "",
         )
 
     # ------------------------------------------------------------------
@@ -260,9 +326,11 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         """Map coordinates of a (fractional) pixel center."""
         w = self.image.width()
         h = self.image.height()
-        fit = self.polyFit()
-        if fit is not None:
-            x, y = transform_math.poly_pixel_to_map(px, py, fit, w, h)
+        fitted = self.fitTransform()
+        if fitted is not None:
+            x, y = transform_math.fitted_pixel_to_map(
+                fitted["kind"], fitted["fit"], px, py, w, h
+            )
             return QgsPointXY(x, y)
         x, y = transform_math.pixel_to_map(
             px,
@@ -281,15 +349,20 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         """(Fractional) pixel coordinates of a map position."""
         w = self.image.width()
         h = self.image.height()
-        fit = self.polyFit()
-        if fit is not None:
+        fitted = self.fitTransform()
+        if fitted is not None:
+            kind, fit = fitted["kind"], fitted["fit"]
             try:
-                px, py = transform_math.poly_map_to_pixel(x, y, fit, w, h)
-                return px, py
+                if kind == "tps":
+                    return transform_math.tps_map_to_pixel(x, y, fit, w, h)
+                return transform_math.poly_map_to_pixel(x, y, fit, w, h)
             except ValueError:
                 # far outside the raster footprint: fall back to the
                 # affine equivalent at the image center
-                local = transform_math.poly_local_params(fit, w, h)
+                if kind == "tps":
+                    local = transform_math.tps_local_params(fit, w, h)
+                else:
+                    local = transform_math.poly_local_params(fit, w, h)
                 return transform_math.map_to_pixel(
                     x,
                     y,
@@ -358,9 +431,11 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         ]
         w = self.image.width()
         h = self.image.height()
-        fit = self.polyFit()
-        if fit is not None:
-            return transform_math.poly_residuals(pairs, fit, w, h)
+        fitted = self.fitTransform()
+        if fitted is not None:
+            return transform_math.fitted_residuals(
+                fitted["kind"], fitted["fit"], pairs, w, h
+            )
         return transform_math.residuals(
             pairs,
             {
@@ -388,11 +463,21 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         w = self.image.width()
         h = self.image.height()
 
-        if self.isPolyMode():
+        if self.isTPSMode():
+            fit = transform_math.fit_tps(pairs, w, h)
+            if fit is None:
+                return False
+            self.tpsFit = fit
+            self.polyCoeffs = None
+            # the classic parameters hold the affine equivalent at the
+            # image center (display in the numeric widgets, export hints)
+            local = transform_math.tps_local_params(fit, w, h)
+        elif self.isPolyMode():
             fit = transform_math.fit_poly(self.fitModel, pairs, w, h)
             if fit is None:
                 return False
             self.polyCoeffs = list(fit["coeffs"])
+            self.tpsFit = None
             # the classic parameters hold the affine equivalent at the
             # image center (display in the numeric widgets, export hints)
             local = transform_math.poly_local_params(fit, w, h)
@@ -401,6 +486,7 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
             if fit is None:
                 return False
             self.polyCoeffs = None
+            self.tpsFit = None
             local = fit
 
         self.setCenter(QgsPointXY(local["cx"], local["cy"]))
@@ -674,6 +760,9 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         layer.yScale = self.yScale
         layer.fitModel = self.fitModel
         layer.polyCoeffs = list(self.polyCoeffs) if self.polyCoeffs else None
+        layer.tpsFit = (
+            json.loads(json.dumps(self.tpsFit)) if self.tpsFit else None
+        )
         layer.tiePoints = [dict(p) for p in self.tiePoints]
         layer.commitTransformParameters()
         return layer
@@ -698,15 +787,15 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         if self._extent:
             return self._extent
 
-        if self.isPolyMode():
-            # warped footprint: sample the polynomial on a grid
-            fit = self.polyFit()
-            if fit is not None:
+        if self.isFittedMode():
+            # warped footprint: sample the fitted transform on a grid
+            fitted = self.fitTransform()
+            if fitted is not None:
                 w = self.image.width()
                 h = self.image.height()
                 minX, minY, maxX, maxY = polymesh.warped_bounds(
-                    lambda px, py: transform_math.poly_pixel_to_map(
-                        px, py, fit, w, h
+                    lambda px, py: transform_math.fitted_pixel_to_map(
+                        fitted["kind"], fitted["fit"], px, py, w, h
                     ),
                     w,
                     h,
@@ -861,7 +950,7 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
 
         self.map2pixel = renderContext.mapToPixel()
 
-        fit = self.polyFit()
+        fit = self.fitTransform()
         if fit is not None:
             self._drawRasterWarped(painter, fit)
             return
@@ -898,13 +987,16 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         painter.setPen(pen)
         painter.drawRect(rect)
 
-    def _drawRasterWarped(self, painter, fit):
-        """Polynomial mode: draw the raster warped by the polynomial."""
+    def _drawRasterWarped(self, painter, fitted):
+        """Fitted-transform mode (polynomial / rubbersheet): draw the
+        raster warped by the fitted transform."""
         w = self.image.width()
         h = self.image.height()
+        kind = fitted["kind"]
+        fit = fitted["fit"]
 
         def pixel_to_map_fn(px, py):
-            return transform_math.poly_pixel_to_map(px, py, fit, w, h)
+            return transform_math.fitted_pixel_to_map(kind, fit, px, py, w, h)
 
         def map_to_device_fn(mx, my):
             pt = self.map2pixel.transform(QgsPointXY(mx, my))
@@ -943,7 +1035,9 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
             self.fitModel = int(self.customProperty("fitModel", 0))
         except (TypeError, ValueError):
             self.fitModel = 0
-        if self.fitModel not in (0,) + transform_math.POLY_ORDERS:
+        if self.fitModel not in (0,) + transform_math.POLY_ORDERS + (
+            transform_math.TPS_ORDER,
+        ):
             self.fitModel = 0
         try:
             raw = self.customProperty("polyCoeffs", "")
@@ -951,6 +1045,21 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
             self.polyCoeffs = [float(v) for v in coeffs] if coeffs else None
         except (TypeError, ValueError):
             self.polyCoeffs = None
+        self.tpsFit = None
+        try:
+            raw = self.customProperty("tpsFit", "")
+            data = json.loads(raw) if raw else None
+            if isinstance(data, dict) and data.get("tps"):
+                self.tpsFit = {
+                    "tps": True,
+                    "src": [
+                        [float(x), float(y)] for x, y in data.get("src", [])
+                    ],
+                    "norm": float(data.get("norm", 1.0)) or 1.0,
+                    "coeffs": [float(v) for v in data.get("coeffs", [])],
+                }
+        except (TypeError, ValueError):
+            self.tpsFit = None
         self.setTransparency(
             int(self.customProperty("transparency", LayerDefaultSettings.TRANSPARENCY))
         )
@@ -999,7 +1108,11 @@ class FreehandRasterGeoreferencerLayer(QgsPluginLayer):
         lines.append(fmt % (self.tr("Y center"), str(self.center.y())))
         lines.append(fmt % (self.tr("X scale"), str(self.xScale)))
         lines.append(fmt % (self.tr("Y scale"), str(self.yScale)))
-        if self.isPolyMode():
+        if self.isTPSMode():
+            lines.append(
+                fmt % (self.tr("Fit model"), "rubbersheet (thin plate spline)")
+            )
+        elif self.isPolyMode():
             lines.append(
                 fmt % (self.tr("Fit model"), "polynomial %d" % self.fitModel)
             )

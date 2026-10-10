@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.9.12
+version = 0.9.13
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,26 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.13
+        * NEW: rubbersheet transformation (thin plate spline) - a new
+          "Rubbersheet (thin plate spline)" entry in the fit model combo
+          (like ArcGIS Spline / the TPS of the QGIS georeferencer). The
+          surface passes exactly through every enabled tie point and
+          bends smoothly between them (3 points minimum); rendered as a
+          mesh and exported through GDAL's TPS transformer (COG or
+          tiled GeoTIFF - a world file cannot encode it)
+        * NEW: loading tie points now zooms the map to the georeferenced
+          raster and activates the N-points tool right away, so saved
+          points can be refined immediately (drag / disable / delete -
+          refit after every change)
+        * FIX: the polynomial / rubbersheet inversion used an absolute
+          Newton tolerance that is below the double precision noise at
+          projected map coordinates (~1e6+): the inversion silently
+          fell back to the local affine approximation on every map
+          click in such CRSs; the tolerance is now relative
+        * the fitted model state (fit model + coefficients, polynomial
+          or rubbersheet) is covered by Undo everywhere (fit model
+          switch, point edits, points load)
     0.9.12
         * FIX: the plain GeoTIFF export (non-COG) of the polynomial warp
           path failed with "PREDICTOR=STANDARD is not supported" - the

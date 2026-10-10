@@ -550,15 +550,15 @@ class FreehandRasterGeoreferencer(object):
         self._toggleTool(self.georef2PTool)
 
     def _manualToolBlockedByPolyMode(self):
-        """Manual transform tools cannot be used with a polynomial fit
-        model (they would contradict the fitted polynomial)."""
+        """Manual transform tools cannot be used with a fitted transform
+        (polynomial / rubbersheet): they would contradict the fit."""
         layer = getattr(self, "layer", None)
-        if isinstance(layer, FreehandRasterGeoreferencerLayer) and layer.isPolyMode():
+        if isinstance(layer, FreehandRasterGeoreferencerLayer) and layer.isFittedMode():
             self.iface.messageBar().pushMessage(
                 "Freehand Raster Georeferencer",
-                "Manual transform tools are disabled in polynomial fit mode: "
-                "edit the tie points instead (a polynomial is refitted after "
-                "every point change).",
+                "Manual transform tools are disabled in polynomial / "
+                "rubbersheet fit mode: edit the tie points instead (the "
+                "fit is recomputed after every point change).",
                 level=2,
                 duration=5,
             )
@@ -586,9 +586,9 @@ class FreehandRasterGeoreferencer(object):
             self.actionShowPointsDock.blockSignals(wasBlocked)
 
     def _pushUndoPointsState(self, layer):
-        """Snapshot the tie points, the fit model and the transform into
-        the layer history BEFORE a points edit, so that Undo can restore
-        everything."""
+        """Snapshot the tie points, the fit model state and the transform
+        into the layer history BEFORE a points edit, so that Undo can
+        restore everything."""
         layer.pushHistory(
             {
                 "action": "npfit",
@@ -596,10 +596,7 @@ class FreehandRasterGeoreferencer(object):
                 "rotation": layer.rotation,
                 "xScale": layer.xScale,
                 "yScale": layer.yScale,
-                "fitModel": layer.fitModel,
-                "polyCoeffs": list(layer.polyCoeffs)
-                if layer.polyCoeffs
-                else None,
+                "fitState": layer.fitStateSnapshot(),
                 "tiePoints": [dict(p) for p in layer.tiePoints],
             }
         )
@@ -634,10 +631,10 @@ class FreehandRasterGeoreferencer(object):
     )
 
     def _deactivateManualToolIfPoly(self, layer):
-        """Leave the current manual tool active when a polynomial fit model
-        is selected (manual move / rotate / scale contradict the fitted
-        polynomial)."""
-        if layer is None or not layer.isPolyMode():
+        """Leave the current manual tool active when a fitted transform
+        (polynomial / rubbersheet) is selected: manual move / rotate /
+        scale contradict the fit."""
+        if layer is None or not layer.isFittedMode():
             return
         if self.currentTool is None:
             return
@@ -948,10 +945,7 @@ class FreehandRasterGeoreferencer(object):
                 "rotation": layer.rotation,
                 "xScale": layer.xScale,
                 "yScale": layer.yScale,
-                "fitModel": layer.fitModel,
-                "polyCoeffs": list(layer.polyCoeffs)
-                if layer.polyCoeffs
-                else None,
+                "fitState": layer.fitStateSnapshot(),
                 "tiePoints": [dict(p) for p in layer.tiePoints],
             }
         )
@@ -968,6 +962,17 @@ class FreehandRasterGeoreferencer(object):
                 level=1,
                 duration=5,
             )
+            # the raster just moved to its georeferenced position: bring
+            # it into view and hand over to the N-points tool so that the
+            # points can be refined right away
+            try:
+                canvas = self.iface.mapCanvas()
+                canvas.setExtent(layer.extent())
+                canvas.refresh()
+            except Exception:
+                pass
+            if not isinstance(self.currentTool, GeorefRasterByNPointsMapTool):
+                self.georefNPRaster()
         else:
             self.iface.messageBar().pushMessage(
                 "Freehand Raster Georeferencer",
@@ -997,9 +1002,12 @@ class FreehandRasterGeoreferencer(object):
             # restore the tie points as they were before the action
             # (add / toggle / delete / clear / load / model change)
             layer.setTiePoints([dict(p) for p in act["tiePoints"]])
-        if "fitModel" in act:
-            # restore the fit model + polynomial coefficients (if any) as
-            # they were before the action
+        if "fitState" in act:
+            # restore the fit model + coefficients (polynomial or
+            # rubbersheet) as they were before the action
+            layer.restoreFitState(act["fitState"])
+        elif "fitModel" in act:
+            # legacy entries (before fitStateSnapshot existed)
             layer.fitModel = act["fitModel"]
             layer.polyCoeffs = (
                 list(act["polyCoeffs"]) if act["polyCoeffs"] else None
