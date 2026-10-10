@@ -11,6 +11,7 @@
 
 import math
 import os
+import tempfile
 
 from osgeo import gdal
 from PyQt5.QtCore import qDebug, QPointF, QRectF, QSize
@@ -470,6 +471,17 @@ class ExportGeorefRasterCommand(object):
                 "Raster Geoferencer", "Raster exported successfully."
             )
             self.iface.messageBar().pushWidget(widget, Qgis.Info, 2)
+        except MemoryError:
+            QgsMessageLog.logMessage(
+                "Raster Geoferencer: out of memory while exporting the raster"
+            )
+            widget = QgsMessageBar.createMessage(
+                "Raster Geoferencer",
+                "Not enough memory to export the raster. Try the plain "
+                "GeoTIFF export with DEFLATE compression, or export a "
+                "smaller extent.",
+            )
+            self.iface.messageBar().pushWidget(widget, Qgis.Critical, 8)
         except Exception as ex:
             QgsMessageLog.logMessage(repr(ex))
             widget = QgsMessageBar.createMessage(
@@ -559,8 +571,15 @@ class ExportGeorefRasterCommand(object):
 
         if isExportCOG:
             # build a plain (tiled) GeoTIFF first, then COG CreateCopy -
-            # the COG driver cannot take the warp output options directly
-            tempPath = "/vsimem/fhrgr_polywarp_%d.tif" % id(self)
+            # the COG driver cannot take the warp output options directly.
+            # The temp goes to DISK, not /vsimem: a full raster copy held
+            # in RAM (gigabytes on the big scans this plugin serves)
+            # pushed the QGIS process into the commit limit and could
+            # crash it hard on memory-constrained Windows sessions
+            fd, tempPath = tempfile.mkstemp(
+                prefix="fhrgr_polywarp_", suffix=".tif"
+            )
+            os.close(fd)
             try:
                 polywarp.warp_poly(
                     srcPath,
@@ -586,8 +605,8 @@ class ExportGeorefRasterCommand(object):
                 temp = None
             finally:
                 try:
-                    gdal.Unlink(tempPath)
-                except Exception:
+                    os.remove(tempPath)
+                except OSError:
                     pass
         else:
             polywarp.warp_poly(

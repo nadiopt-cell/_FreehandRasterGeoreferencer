@@ -35,6 +35,13 @@ MAX_OUTPUT_PIXELS = 400_000_000
 # output tiles: Newton + sampling run on tile*tile windows
 TILE = 512
 
+# per-tile source window cap: a read window larger than this many pixels
+# is handled by splitting the output tile into quadrants (bounded peak
+# memory); a fit that still needs a huge window at the smallest split
+# depth is pathological and raises instead of allocating gigabytes
+MAX_WINDOW_PIXELS = 16_000_000
+MAX_SPLIT_DEPTH = 3
+
 
 # ----------------------------------------------------------------------
 # separable sampling kernels (taps at integer offsets, weights)
@@ -218,14 +225,15 @@ def warp_poly(
     gt = (minX, xRes, 0.0, maxY, 0.0, -yRes)
 
     half = 1 + (len(_kernel_taps(resampling)[0]) // 2)
+    winDtype = _window_dtype(bandType)
     for ty0 in range(0, ny, TILE):
         ty1 = min(ny, ty0 + TILE)
         for tx0 in range(0, nx, TILE):
             tx1 = min(nx, tx0 + TILE)
-            _warp_tile(
+            _warp_region(
                 out, src, fit, width, height, gt, tx0, ty0, tx1, ty1,
                 resampling, bandType, bandsOut, expandPalette, palette,
-                half,
+                half, winDtype, 0,
             )
         if progress is not None:
             progress(min(1.0, ty1 / float(ny)))
@@ -236,10 +244,28 @@ def warp_poly(
     return nx, ny
 
 
-def _warp_tile(
+def _window_dtype(bandType):
+    """numpy dtype of the per-tile source window: float32 for integer
+    rasters (halves the peak memory; exact for integer data, the
+    accumulation stays float64), float64 for float rasters."""
+    if gdal.GetDataTypeName(bandType) in ("Float32", "Float64"):
+        return np.float64
+    return np.float32
+
+
+def _warp_region(
     out, src, fit, width, height, gt, tx0, ty0, tx1, ty1,
     resampling, bandType, bandsOut, expandPalette, palette, half,
+    winDtype, depth,
 ):
+    """Warp one output rectangle [tx0:tx1, ty0:ty1).
+
+    The source window the rectangle maps to is read once per rectangle.
+    When that window would exceed MAX_WINDOW_PIXELS (a broken / wildly
+    zoomed fit), the rectangle is split into quadrants - each maps to a
+    smaller source area. A fit that still needs a huge window at the
+    smallest depth is pathological and raises (instead of allocating
+    gigabytes and taking QGIS down on memory-constrained sessions)."""
     j, i = np.meshgrid(
         np.arange(ty0, ty1, dtype=float), np.arange(tx0, tx1, dtype=float),
         indexing="ij",
@@ -251,7 +277,7 @@ def _warp_tile(
     # the layer's polynomial, inverted exactly (vectorized Newton)
     px, py, ok = transform_math.poly_map_to_pixel_grid(mx, my, fit, width, height)
 
-    # source window covering the tile footprint (kernel half width + 1)
+    # source window covering the region footprint (kernel half width + 1)
     valid = ok
     if valid.any():
         c0 = int(max(0, math.floor(px[valid].min()) - half))
@@ -268,7 +294,26 @@ def _warp_tile(
 
     winW = c1 - c0 + 1
     winH = r1 - r0 + 1
-    win = np.zeros((winH, winW, bandsOut), dtype=np.float64)
+    if winW * winH > MAX_WINDOW_PIXELS:
+        if depth >= MAX_SPLIT_DEPTH:
+            raise RuntimeError(
+                "The fit maps part of the export to a huge area of the "
+                "source raster; check the tie points and the fit"
+            )
+        midx = (tx0 + tx1) // 2
+        midy = (ty0 + ty1) // 2
+        for qx0, qx1 in ((tx0, midx), (midx, tx1)):
+            for qy0, qy1 in ((ty0, midy), (midy, ty1)):
+                if qx1 > qx0 and qy1 > qy0:
+                    _warp_region(
+                        out, src, fit, width, height, gt,
+                        qx0, qy0, qx1, qy1,
+                        resampling, bandType, bandsOut, expandPalette,
+                        palette, half, winDtype, depth + 1,
+                    )
+        return
+
+    win = np.zeros((winH, winW, bandsOut), dtype=winDtype)
     if valid.any() and winW > 0 and winH > 0:
         if expandPalette:
             # single paletted band -> expand to the RGB planes
@@ -282,7 +327,7 @@ def _warp_tile(
             for b in range(bandsOut):
                 win[..., b] = src.GetRasterBand(b + 1).ReadAsArray(
                     c0, r0, winW, winH
-                ).astype(np.float64)
+                ).astype(winDtype)
 
     values, inside = _sample(win, px, py, float(c0), float(r0), resampling, bandsOut)
     alpha = (valid & inside)

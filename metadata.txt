@@ -3,7 +3,7 @@ name = Freehand raster georeferencer
 qgisMinimumVersion=3.0
 description = Interactive georeferencing of rasters
 about = Tools to georeference a raster interactively (move, rotate, scale, export...)
-version = 0.9.16
+version = 0.9.17
 author = Guilhem Vellut
 email = g@vellut.com
 tags = raster,georeferencing
@@ -15,6 +15,21 @@ experimental = False
 deprecated = False
 category = Raster
 changelog = 
+    0.9.17
+        * FIX: QGIS could crash hard right after the polynomial export
+          (reported as "exported, then QGIS died"). Two multi-gigabyte
+          memory spikes of the new exact poly warp are removed: the COG
+          export built its temporary full-size GeoTIFF in /vsimem (RAM)
+          before CreateCopy - it now goes to a temporary file on disk
+          (streamed, like the pre-0.9.16 exports) and is deleted
+          afterwards; and the per-tile source window of the warp is
+          capped - oversized windows (a wildly zoomed / broken fit)
+          are handled by splitting the output tile into quadrants,
+          integer rasters are read into float32 windows (half the
+          memory, exact for integer data), and a fit that still needs
+          a huge window raises a clear error message instead of
+          allocating gigabytes. Out-of-memory exports now show a
+          hint (plain GeoTIFF + DEFLATE) instead of dying
     0.9.16
         * FIX: the exported raster did not match what the canvas shows
           when a polynomial fit was active (reported as "the 3rd-degree

@@ -278,3 +278,66 @@ def test_polywarp_rejects_absurd_output(tmp_path):
             0.001, 0.001,
             resampling="near", creationOptions=[],
         )
+
+
+def test_polywarp_huge_window_split_keeps_exactness(tmp_path, monkeypatch):
+    """v0.9.17 regression: when a tile's source window exceeds the
+    memory cap the tile is split into quadrants - the export must stay
+    EXACT (same layer transform, bounded peak memory)."""
+    w, h, s = 900, 700, 10.0
+    fit = _block_fit(3, s=s)
+    srcPath = str(tmp_path / "src.tif")
+    outPath = str(tmp_path / "out.tif")
+    _make_source(srcPath, w, h, block=50)
+    bounds = _footprint(fit, w, h, s)
+    # force the split: a 512 tile at 1:1 reads a ~512x512 window, which
+    # is above this cap, so every tile goes through the quadrant path
+    monkeypatch.setattr(polywarp, "MAX_WINDOW_PIXELS", 100_000)
+
+    polywarp.warp_poly(
+        srcPath, outPath, fit, w, h, WKT, bounds, s, s,
+        resampling="near", creationOptions=[],
+    )
+
+    out = gdal.Open(outPath)
+    gt = out.GetGeoTransform()
+    data = out.GetRasterBand(1).ReadAsArray().astype(int)
+    alpha = out.GetRasterBand(2).ReadAsArray()
+
+    def expected_value(px, py):
+        return int(((int(px) // 50) * 13 + (int(py) // 50) * 7) % 251 + 1)
+
+    checked = 0
+    for py in range(25, h - 25, 50):
+        for px in range(25, w - 25, 50):
+            mx, my = transform_math.poly_pixel_to_map(
+                float(px), float(py), fit, w, h
+            )
+            i = int(round((mx - gt[0]) / gt[1] - 0.5))
+            j = int(round((my - gt[3]) / gt[5] - 0.5))
+            if i < 0 or j < 0 or i >= out.RasterXSize or j >= out.RasterYSize:
+                continue
+            assert alpha[j, i] > 0, "interior pixel must be valid"
+            assert data[j, i] == expected_value(px, py), (
+                "split-tile export mismatch at source pixel %d,%d" % (px, py)
+            )
+            checked += 1
+    assert checked > 200
+
+
+def test_polywarp_pathological_window_raises(tmp_path, monkeypatch):
+    """A fit that still needs a huge source window at the smallest split
+    depth must raise a clear error instead of allocating gigabytes."""
+    w, h, s = 300, 200, 10.0
+    fit = _block_fit(3, s=s)
+    srcPath = str(tmp_path / "src.tif")
+    outPath = str(tmp_path / "out.tif")
+    _make_source(srcPath, w, h, block=50)
+    bounds = _footprint(fit, w, h, s)
+    monkeypatch.setattr(polywarp, "MAX_WINDOW_PIXELS", 1_000)
+    monkeypatch.setattr(polywarp, "MAX_SPLIT_DEPTH", 1)
+    with pytest.raises(RuntimeError):
+        polywarp.warp_poly(
+            srcPath, outPath, fit, w, h, WKT, bounds, s, s,
+            resampling="near", creationOptions=[],
+        )
